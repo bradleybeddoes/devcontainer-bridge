@@ -90,40 +90,36 @@ pub async fn handle_connect_request(
     debug!(port, %conn_id, "connecting to local port");
 
     let ipv4_addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let mut local_stream = match tokio::time::timeout(
-        LOCAL_CONNECT_TIMEOUT,
-        TcpStream::connect(ipv4_addr),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(ipv4_err)) => {
-            debug!(port, %conn_id, error = %ipv4_err, "IPv4 connect failed, trying IPv6");
-            let ipv6_addr: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
-            tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, TcpStream::connect(ipv6_addr))
-                .await
-                .map_err(|_| DataError::LocalConnect {
+    let mut local_stream =
+        match tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, TcpStream::connect(ipv4_addr)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(ipv4_err)) => {
+                debug!(port, %conn_id, error = %ipv4_err, "IPv4 connect failed, trying IPv6");
+                let ipv6_addr: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
+                tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, TcpStream::connect(ipv6_addr))
+                    .await
+                    .map_err(|_| DataError::LocalConnect {
+                        port,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "IPv6 connect timed out",
+                        ),
+                    })?
+                    .map_err(|_| DataError::LocalConnect {
+                        port,
+                        source: ipv4_err,
+                    })?
+            }
+            Err(_) => {
+                return Err(DataError::LocalConnect {
                     port,
                     source: std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
-                        "IPv6 connect timed out",
+                        "IPv4 connect timed out",
                     ),
-                })?
-                .map_err(|_| DataError::LocalConnect {
-                    port,
-                    source: ipv4_err,
-                })?
-        }
-        Err(_) => {
-            return Err(DataError::LocalConnect {
-                port,
-                source: std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "IPv4 connect timed out",
-                ),
-            });
-        }
-    };
+                });
+            }
+        };
 
     // Step 2: Open reverse data connection to the host
     debug!(%host_data_addr, %conn_id, "opening reverse data connection to host");

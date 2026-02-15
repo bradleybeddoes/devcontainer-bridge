@@ -72,7 +72,11 @@ pub enum EnsureError {
 /// # Errors
 ///
 /// Returns [`EnsureError`] if the daemon cannot be started or verified.
-pub async fn run_ensure(host: IpAddr, control_port: u16, data_port: u16) -> Result<(), EnsureError> {
+pub async fn run_ensure(
+    host: IpAddr,
+    control_port: u16,
+    data_port: u16,
+) -> Result<(), EnsureError> {
     let addr: SocketAddr = (host, control_port).into();
 
     // Step 1: Try connecting

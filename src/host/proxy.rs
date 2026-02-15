@@ -174,7 +174,11 @@ pub async fn bridge_connection(
             // (e.g., the first payload from the container's local service).
             let pre_read = buffered.len() as u64;
             if !buffered.is_empty() {
-                debug!(conn_id, pre_read_bytes = pre_read, "flushing pre-read data to client");
+                debug!(
+                    conn_id,
+                    pre_read_bytes = pre_read,
+                    "flushing pre-read data to client"
+                );
                 if let Err(source) = client_stream.write_all(&buffered).await {
                     return Err(ProxyError::Io { conn_id, source });
                 }

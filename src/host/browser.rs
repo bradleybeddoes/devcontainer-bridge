@@ -244,10 +244,7 @@ mod tests {
             validate_url("ftp://example.com/file"),
             Err(BrowserError::Validation(_))
         ));
-        assert!(matches!(
-            validate_url(""),
-            Err(BrowserError::Validation(_))
-        ));
+        assert!(matches!(validate_url(""), Err(BrowserError::Validation(_))));
     }
 
     // --- rewrite_url tests ---

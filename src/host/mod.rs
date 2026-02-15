@@ -454,7 +454,9 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
     let ctx = Arc::new(DaemonContext {
         state: Arc::new(Mutex::new(HostState::new())),
         pending: new_pending_connections(),
-        browser: Arc::new(Mutex::new(BrowserOpener::with_cmd(config.browser_cmd.clone()))),
+        browser: Arc::new(Mutex::new(BrowserOpener::with_cmd(
+            config.browser_cmd.clone(),
+        ))),
         client_tx,
     });
     let drain_timeout = config.drain_timeout;
@@ -627,13 +629,8 @@ async fn handle_control_connection(
             }
 
             // Process messages from this container until disconnect
-            let result = handle_container_messages(
-                &mut conn,
-                &container_id,
-                ctx,
-                connect_req_rx,
-            )
-            .await;
+            let result =
+                handle_container_messages(&mut conn, &container_id, ctx, connect_req_rx).await;
 
             // Clean up on disconnect
             cleanup_container(&container_id, &ctx.state).await;
@@ -761,8 +758,15 @@ async fn dispatch_container_message(
             process_name,
             pid,
         } => {
-            let result =
-                handle_forward(container_id, port, process_name, pid, &ctx.state, &ctx.client_tx).await;
+            let result = handle_forward(
+                container_id,
+                port,
+                process_name,
+                pid,
+                &ctx.state,
+                &ctx.client_tx,
+            )
+            .await;
             match result {
                 Ok(host_port) => {
                     if host_port != port {
@@ -773,7 +777,12 @@ async fn dispatch_container_message(
                             "port conflict resolved, assigned alternative host port"
                         );
                     } else {
-                        info!(container_id, container_port = port, host_port, "port forwarded");
+                        info!(
+                            container_id,
+                            container_port = port,
+                            host_port,
+                            "port forwarded"
+                        );
                     }
                     ctx.browser.lock().await.add_port_mapping(port, host_port);
                     conn.send(&Message::ForwardAck {
@@ -805,7 +814,10 @@ async fn dispatch_container_message(
 
         Message::ConnectFailed { conn_id, error } => {
             if conn_id.len() > MAX_CONN_ID_LENGTH {
-                warn!(container_id, "ignoring ConnectFailed with oversized conn_id");
+                warn!(
+                    container_id,
+                    "ignoring ConnectFailed with oversized conn_id"
+                );
             } else {
                 warn!(container_id, conn_id, error, "container connect failed");
                 proxy::cancel_pending(&ctx.pending, &conn_id).await;
@@ -1056,10 +1068,7 @@ async fn handle_data_connection(
 /// Sends a ConnectRequest to the container and waits for the reverse
 /// data connection to be established, then bridges bidirectionally.
 /// Tracks active connection count for graceful draining on teardown.
-async fn handle_client_connection(
-    client_conn: ClientConnection,
-    ctx: &DaemonContext,
-) {
+async fn handle_client_connection(client_conn: ClientConnection, ctx: &DaemonContext) {
     let port = client_conn.container_port;
     let peer = client_conn.peer_addr;
 
@@ -1139,7 +1148,9 @@ async fn handle_client_connection(
                 }
             }
         }
-        None => Some(bridge_connection(conn_id.clone(), client_conn.stream, data_rx, &ctx.pending).await),
+        None => Some(
+            bridge_connection(conn_id.clone(), client_conn.stream, data_rx, &ctx.pending).await,
+        ),
     };
 
     match bridge_result {

@@ -243,11 +243,7 @@ async fn register_cli_client(conn: &mut ControlConnection) -> Result<(), CliErro
 ///
 /// If `json` is true, outputs the response as JSON. Otherwise, displays a
 /// human-readable table.
-async fn run_status(
-    host: std::net::IpAddr,
-    control_port: u16,
-    json: bool,
-) -> Result<(), CliError> {
+async fn run_status(host: std::net::IpAddr, control_port: u16, json: bool) -> Result<(), CliError> {
     let mut conn = connect_to_host(host, control_port)
         .await
         .map_err(CliError::Connection)?;
@@ -317,11 +313,7 @@ fn format_since(since: &str) -> String {
 }
 
 /// Connect to the host daemon and send a manual `Forward` request.
-async fn run_forward(
-    host: std::net::IpAddr,
-    port: u16,
-    control_port: u16,
-) -> Result<(), CliError> {
+async fn run_forward(host: std::net::IpAddr, port: u16, control_port: u16) -> Result<(), CliError> {
     let mut conn = connect_to_host(host, control_port)
         .await
         .map_err(CliError::Connection)?;
