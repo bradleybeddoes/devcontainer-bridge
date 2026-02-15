@@ -1,0 +1,9 @@
+name: dbr-e2e
+
+services:
+  dbr-test-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

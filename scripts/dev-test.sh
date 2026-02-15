@@ -9,7 +9,6 @@
 # Usage:
 #   scripts/dev-test.sh                    # full build + deploy + test
 #   scripts/dev-test.sh --skip-build       # skip builds, just deploy + test
-#   scripts/dev-test.sh --container NAME   # target a specific container
 #   scripts/dev-test.sh --help             # show usage
 #
 # Exit codes:
@@ -60,7 +59,8 @@ log_phase() { echo -e "\n${BOLD}=== $* ===${NC}\n"; }
 # ---------------------------------------------------------------------------
 
 SKIP_BUILD=false
-TARGET_CONTAINER=""
+E2E_COMPOSE="$PROJECT_ROOT/tests/e2e/docker-compose.yml"
+TEST_CONTAINER_NAME="dbr-e2e-dbr-test-app-1"
 
 usage() {
     cat <<EOF
@@ -68,15 +68,16 @@ Usage: $(basename "$0") [OPTIONS]
 
 Automated build-deploy-test cycle for devcontainer-bridge.
 
+Uses a self-contained test container (tests/e2e/) — no external
+devcontainers are required or touched.
+
 Options:
   --skip-build          Skip the build phase (use existing binaries)
-  --container NAME      Target a specific container (substring match)
   --help                Show this help message
 
 Examples:
   $(basename "$0")                          # full cycle
   $(basename "$0") --skip-build             # re-test with existing binaries
-  $(basename "$0") --container myproject    # test against a specific container
 EOF
     exit 0
 }
@@ -86,10 +87,6 @@ while [[ $# -gt 0 ]]; do
         --skip-build)
             SKIP_BUILD=true
             shift
-            ;;
-        --container)
-            TARGET_CONTAINER="$2"
-            shift 2
             ;;
         --help|-h)
             usage
@@ -132,6 +129,10 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
     done
 
+    # Tear down the test container
+    log_info "Tearing down test container..."
+    docker compose -f "$E2E_COMPOSE" down 2>/dev/null || true
+
     # Print summary
     echo ""
     log_phase "Test Summary"
@@ -169,25 +170,6 @@ wait_for_port() {
         fi
     done
     return 0
-}
-
-# Discover devcontainer app containers
-discover_containers() {
-    local filter=""
-    if [[ -n "$TARGET_CONTAINER" ]]; then
-        filter="$TARGET_CONTAINER"
-    fi
-
-    # Match devcontainer app containers
-    # Typical names: projectname_devcontainer-app-1, projectname_devcontainer_app_1
-    local containers
-    containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "devcontainer" | grep -i "app" || true)
-
-    if [[ -n "$filter" ]]; then
-        containers=$(echo "$containers" | grep -i "$filter" || true)
-    fi
-
-    echo "$containers"
 }
 
 # Check if a string appears in dbr status output
@@ -280,62 +262,59 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test container phase
+# ---------------------------------------------------------------------------
+
+log_phase "Test Container"
+
+log_info "Starting test container..."
+if docker compose -f "$E2E_COMPOSE" up -d --build 2>&1; then
+    # Wait for container to be running
+    tc_timeout=10
+    tc_elapsed=0
+    while ! docker inspect --format='{{.State.Running}}' "$TEST_CONTAINER_NAME" 2>/dev/null | grep -q "true"; do
+        sleep 1
+        tc_elapsed=$((tc_elapsed + 1))
+        if [[ $tc_elapsed -ge $tc_timeout ]]; then
+            log_fail "Test container did not start within ${tc_timeout}s"
+            exit 1
+        fi
+    done
+    log_pass "Test container is running"
+else
+    log_fail "Failed to start test container"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Deploy phase
 # ---------------------------------------------------------------------------
 
 log_phase "Deploy Phase"
 
-# Discover containers
-containers=$(discover_containers)
-if [[ -z "$containers" ]]; then
-    log_fail "No devcontainer app containers found"
-    echo "  Make sure a devcontainer is running. Looking for containers matching:" >&2
-    echo "    docker ps --format '{{.Names}}' | grep devcontainer | grep app" >&2
-    if [[ -n "$TARGET_CONTAINER" ]]; then
-        echo "  With additional filter: $TARGET_CONTAINER" >&2
-    fi
-    exit 1
-fi
+log_info "Deploying to $TEST_CONTAINER_NAME..."
 
-container_count=$(echo "$containers" | wc -l | tr -d ' ')
-log_info "Found $container_count container(s):"
-echo "$containers" | while read -r name; do
-    echo "  - $name"
-done
+# Kill any existing dbr processes
+docker exec "$TEST_CONTAINER_NAME" pkill -f "dbr container-daemon" 2>/dev/null || true
+docker exec "$TEST_CONTAINER_NAME" pkill -f "dbr host-daemon" 2>/dev/null || true
+sleep 0.5
 
-# Deploy to each container
-deployed_containers=()
-while IFS= read -r container; do
-    [[ -z "$container" ]] && continue
+# Copy the Linux binary into the container
+if docker cp "$LINUX_BINARY" "$TEST_CONTAINER_NAME:$CONTAINER_BINARY_PATH" 2>&1; then
+    # Ensure it is executable
+    docker exec "$TEST_CONTAINER_NAME" chmod +x "$CONTAINER_BINARY_PATH" 2>/dev/null || true
 
-    log_info "Deploying to $container..."
-
-    # Kill any existing dbr processes
-    docker exec "$container" pkill -f "dbr container-daemon" 2>/dev/null || true
-    docker exec "$container" pkill -f "dbr host-daemon" 2>/dev/null || true
-    sleep 0.5
-
-    # Copy the Linux binary into the container
-    if docker cp "$LINUX_BINARY" "$container:$CONTAINER_BINARY_PATH" 2>&1; then
-        # Ensure it is executable
-        docker exec "$container" chmod +x "$CONTAINER_BINARY_PATH" 2>/dev/null || true
-
-        # Verify it runs
-        if docker exec "$container" "$CONTAINER_BINARY_PATH" --help >/dev/null 2>&1; then
-            log_pass "Deployed and verified in $container"
-            deployed_containers+=("$container")
-            CLEANUP_CONTAINERS+=("$container")
-        else
-            log_fail "Binary deployed but failed to run in $container"
-            log_info "  This may indicate an architecture mismatch (host vs container)"
-        fi
+    # Verify it runs
+    if docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" --help >/dev/null 2>&1; then
+        log_pass "Deployed and verified in $TEST_CONTAINER_NAME"
+        CLEANUP_CONTAINERS+=("$TEST_CONTAINER_NAME")
     else
-        log_fail "Failed to copy binary to $container"
+        log_fail "Binary deployed but failed to run in $TEST_CONTAINER_NAME"
+        log_info "  This may indicate an architecture mismatch (host vs container)"
+        exit 1
     fi
-done <<< "$containers"
-
-if [[ ${#deployed_containers[@]} -eq 0 ]]; then
-    log_fail "No containers were successfully deployed to"
+else
+    log_fail "Failed to copy binary to $TEST_CONTAINER_NAME"
     exit 1
 fi
 
@@ -345,8 +324,7 @@ fi
 
 log_phase "Pre-flight: Container Connectivity"
 
-for container in "${deployed_containers[@]}"; do
-    host_reachable=$(docker exec "$container" python3 -c "
+host_reachable=$(docker exec "$TEST_CONTAINER_NAME" python3 -c "
 import socket
 try:
     ip = socket.gethostbyname('host.docker.internal')
@@ -367,16 +345,14 @@ except:
         print('no')
 " 2>/dev/null || echo "no")
 
-    if [[ "$host_reachable" == "yes" ]]; then
-        log_pass "Container $container has working outbound connectivity"
-    else
-        log_fail "Container $container has broken outbound connectivity"
-        log_info "  This usually means the container needs a restart (stale OrbStack/Docker networking)"
-        log_info "  Fix: docker restart $container"
-        log_info "  Then re-run this script"
-        exit 1
-    fi
-done
+if [[ "$host_reachable" == "yes" ]]; then
+    log_pass "Container $TEST_CONTAINER_NAME has working outbound connectivity"
+else
+    log_fail "Container $TEST_CONTAINER_NAME has broken outbound connectivity"
+    log_info "  Fix: docker restart $TEST_CONTAINER_NAME"
+    log_info "  Then re-run this script"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Test phase: Host daemon
@@ -427,32 +403,30 @@ fi
 
 log_phase "Test Phase: Container Daemons"
 
-for container in "${deployed_containers[@]}"; do
-    log_info "Starting container daemon in $container..."
+log_info "Starting container daemon in $TEST_CONTAINER_NAME..."
 
-    # Start container daemon in background
-    docker exec -d "$container" "$CONTAINER_BINARY_PATH" container-daemon 2>&1
+# Start container daemon in background
+docker exec -d "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" container-daemon 2>&1
 
-    # Give it a moment to register
-    sleep "$REGISTER_WAIT"
+# Give it a moment to register
+sleep "$REGISTER_WAIT"
 
-    # Verify registration via status
-    # The hostname should appear in status output
-    if "$HOST_BINARY" status 2>/dev/null | grep -qi "container\|forward\|port" || \
-       "$HOST_BINARY" status --json 2>/dev/null | grep -q "container_id"; then
-        log_pass "Container $container appears registered (status shows data)"
+# Verify registration via status
+# The hostname should appear in status output
+if "$HOST_BINARY" status 2>/dev/null | grep -qi "container\|forward\|port" || \
+   "$HOST_BINARY" status --json 2>/dev/null | grep -q "container_id"; then
+    log_pass "Container $TEST_CONTAINER_NAME appears registered (status shows data)"
+else
+    # Even "No active forwards" is okay -- it means the daemon connected
+    # but nothing is listening yet
+    local_status=$("$HOST_BINARY" status 2>&1 || true)
+    if echo "$local_status" | grep -qi "no active forwards"; then
+        log_pass "Container $TEST_CONTAINER_NAME registered (no active forwards yet)"
     else
-        # Even "No active forwards" is okay -- it means the daemon connected
-        # but nothing is listening yet
-        local_status=$("$HOST_BINARY" status 2>&1 || true)
-        if echo "$local_status" | grep -qi "no active forwards"; then
-            log_pass "Container $container registered (no active forwards yet)"
-        else
-            log_fail "Container $container not appearing in status"
-            log_info "  Status output: $local_status"
-        fi
+        log_fail "Container $TEST_CONTAINER_NAME not appearing in status"
+        log_info "  Status output: $local_status"
     fi
-done
+fi
 
 # ---------------------------------------------------------------------------
 # Test phase: Port forwarding
@@ -460,15 +434,13 @@ done
 
 log_phase "Test Phase: Port Forwarding"
 
-# Use the first deployed container for forwarding tests
-test_container="${deployed_containers[0]}"
-log_info "Using container: $test_container"
+log_info "Using container: $TEST_CONTAINER_NAME"
 
 # Start a TCP listener inside the container using Python3 (nc not available in all containers)
 log_info "Starting TCP listener on port $TEST_PORT in container..."
 
 # Kill any existing listener on the test port
-docker exec "$test_container" sh -c "
+docker exec "$TEST_CONTAINER_NAME" sh -c "
     pkill -f 'tcp_echo_server_$TEST_PORT' 2>/dev/null || true
 " 2>/dev/null || true
 sleep 0.5
@@ -476,7 +448,7 @@ sleep 0.5
 # Start a Python TCP echo server that responds with HELLO_FROM_CONTAINER
 # The script loops to handle multiple connections
 # The "tcp_echo_server_PORT" comment is used as a pkill -f target for cleanup
-docker exec -d "$test_container" python3 -c "
+docker exec -d "$TEST_CONTAINER_NAME" python3 -c "
 # tcp_echo_server_$TEST_PORT
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -585,7 +557,7 @@ fi
 
 # Clean up the test listener
 log_info "Stopping test listener..."
-docker exec "$test_container" sh -c "pkill -f 'tcp_echo_server_$TEST_PORT' 2>/dev/null || true" 2>/dev/null || true
+docker exec "$TEST_CONTAINER_NAME" sh -c "pkill -f 'tcp_echo_server_$TEST_PORT' 2>/dev/null || true" 2>/dev/null || true
 
 # Wait for port to disappear from status
 log_info "Waiting for port $TEST_PORT to disappear from status..."
@@ -611,7 +583,7 @@ log_phase "Test Phase: Browser Opening (OpenUrl)"
 
 # Test 1: dbr open with a valid https URL — should succeed (exit 0)
 log_info "Testing 'dbr open https://example.com' from container..."
-open_out=$(docker exec "$test_container" "$CONTAINER_BINARY_PATH" open "https://example.com" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "https://example.com" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -eq 0 ]]; then
     log_pass "dbr open https URL succeeded (exit 0, full OpenUrl→OpenUrlAck round-trip)"
 else
@@ -621,7 +593,7 @@ fi
 
 # Test 2: dbr open with a valid http URL — should succeed (exit 0)
 log_info "Testing 'dbr open http://localhost:8080/callback' from container..."
-open_out=$(docker exec "$test_container" "$CONTAINER_BINARY_PATH" open "http://localhost:8080/callback" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "http://localhost:8080/callback" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -eq 0 ]]; then
     log_pass "dbr open http URL succeeded (exit 0, full OpenUrl→OpenUrlAck round-trip)"
 else
@@ -631,7 +603,7 @@ fi
 
 # Test 3: dbr open with an invalid scheme — must fail (non-zero exit)
 log_info "Testing 'dbr open ftp://bad' from container (should fail)..."
-open_out=$(docker exec "$test_container" "$CONTAINER_BINARY_PATH" open "ftp://bad" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "ftp://bad" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -ne 0 ]]; then
     log_pass "dbr open correctly rejected ftp:// URL (exit $open_rc)"
 else
@@ -640,7 +612,7 @@ fi
 
 # Test 4: dbr open with an empty URL — must fail (non-zero exit)
 log_info "Testing 'dbr open \"\"' from container (should fail)..."
-open_out=$(docker exec "$test_container" "$CONTAINER_BINARY_PATH" open "" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -ne 0 ]]; then
     log_pass "dbr open correctly rejected empty URL (exit $open_rc)"
 else
@@ -649,7 +621,7 @@ fi
 
 # Test 5: dbr open with javascript: scheme — must fail (non-zero exit)
 log_info "Testing 'dbr open javascript:alert(1)' from container (should fail)..."
-open_out=$(docker exec "$test_container" "$CONTAINER_BINARY_PATH" open "javascript:alert(1)" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "javascript:alert(1)" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -ne 0 ]]; then
     log_pass "dbr open correctly rejected javascript: URL (exit $open_rc)"
 else
