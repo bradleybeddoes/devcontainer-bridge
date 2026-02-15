@@ -20,7 +20,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -94,6 +94,44 @@ pub enum HostError {
     Listener(#[from] ListenerError),
 }
 
+/// Tracks active proxy connection count with drain notification.
+///
+/// Uses `Notify::notify_one` which stores a permit when no waiter
+/// is present, so `wait_drained` never misses a zero-crossing.
+struct ConnectionTracker {
+    count: AtomicUsize,
+    drained: Notify,
+}
+
+impl ConnectionTracker {
+    fn new() -> Self {
+        Self {
+            count: AtomicUsize::new(0),
+            drained: Notify::new(),
+        }
+    }
+
+    fn increment(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement(&self) {
+        if self.count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.drained.notify_one();
+        }
+    }
+
+    fn active(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    async fn wait_drained(&self) {
+        while self.active() > 0 {
+            self.drained.notified().await;
+        }
+    }
+}
+
 /// State for a single forwarded port.
 #[allow(dead_code)] // handle is stored to prevent task detach; awaited in future phases
 struct ForwardState {
@@ -109,8 +147,8 @@ struct ForwardState {
     pid: Option<u32>,
     /// ISO 8601 timestamp of when the forward was established.
     since: String,
-    /// Number of active proxy connections through this forward.
-    active_connections: Arc<AtomicUsize>,
+    /// Active proxy connection tracker for graceful draining.
+    tracker: Arc<ConnectionTracker>,
 }
 
 /// A request to send a ConnectRequest to a container via its control connection.
@@ -759,7 +797,7 @@ async fn handle_forward(
     let (host_port, handle) = start_listener(target_port, shutdown_rx, client_tx.clone()).await?;
 
     let now = timestamp_now();
-    let active_connections = Arc::new(AtomicUsize::new(0));
+    let tracker = Arc::new(ConnectionTracker::new());
 
     let mut s = state.lock().await;
     if let Some(cstate) = s.containers.get_mut(container_id) {
@@ -772,7 +810,7 @@ async fn handle_forward(
                 process_name,
                 pid,
                 since: now,
-                active_connections,
+                tracker,
             },
         );
     }
@@ -797,7 +835,7 @@ async fn handle_unforward(container_id: &str, port: u16, state: &Arc<Mutex<HostS
     if let Some(fstate) = forward {
         let _ = fstate.shutdown_tx.send(true);
         let _ = fstate.handle.await;
-        drain_forward_connections(fstate.active_connections, port, DEFAULT_DRAIN_TIMEOUT).await;
+        drain_forward_connections(&fstate.tracker, port, DEFAULT_DRAIN_TIMEOUT).await;
     }
 }
 
@@ -818,7 +856,7 @@ async fn cleanup_container(container_id: &str, state: &Arc<Mutex<HostState>>) {
                 );
                 s.used_host_ports.remove(&fstate.host_port);
                 let _ = fstate.shutdown_tx.send(true);
-                (port, fstate.handle, fstate.active_connections)
+                (port, fstate.handle, fstate.tracker)
             })
             .collect::<Vec<_>>()
     };
@@ -826,13 +864,11 @@ async fn cleanup_container(container_id: &str, state: &Arc<Mutex<HostState>>) {
     // Await all listener handles first to ensure ports are freed,
     // then drain active proxy connections concurrently.
     let mut drain_set = tokio::task::JoinSet::new();
-    for (port, handle, active) in forwards {
+    for (port, handle, tracker) in forwards {
         let _ = handle.await;
-        drain_set.spawn(drain_forward_connections(
-            active,
-            port,
-            DEFAULT_DRAIN_TIMEOUT,
-        ));
+        drain_set.spawn(async move {
+            drain_forward_connections(&tracker, port, DEFAULT_DRAIN_TIMEOUT).await;
+        });
     }
     while drain_set.join_next().await.is_some() {}
 }
@@ -844,22 +880,24 @@ async fn drain_all_forwards(state: &mut HostState, drain_timeout: Duration) {
     for (_cid, cstate) in state.containers.drain() {
         for (port, fstate) in cstate.forwards {
             let _ = fstate.shutdown_tx.send(true);
-            handles.push((port, fstate.handle, fstate.active_connections));
+            handles.push((port, fstate.handle, fstate.tracker));
         }
     }
     state.used_host_ports.clear();
 
     let mut drain_set = tokio::task::JoinSet::new();
-    for (port, handle, active) in handles {
+    for (port, handle, tracker) in handles {
         let _ = handle.await;
-        drain_set.spawn(drain_forward_connections(active, port, drain_timeout));
+        drain_set.spawn(async move {
+            drain_forward_connections(&tracker, port, drain_timeout).await;
+        });
     }
     while drain_set.join_next().await.is_some() {}
 }
 
 /// Wait for active proxy connections to drain, up to the given timeout.
-async fn drain_forward_connections(active: Arc<AtomicUsize>, port: u16, timeout: Duration) {
-    let count = active.load(Ordering::Relaxed);
+async fn drain_forward_connections(tracker: &ConnectionTracker, port: u16, timeout: Duration) {
+    let count = tracker.active();
     if count == 0 {
         return;
     }
@@ -870,22 +908,12 @@ async fn drain_forward_connections(active: Arc<AtomicUsize>, port: u16, timeout:
         "draining active connections"
     );
 
-    let drain_result = tokio::time::timeout(timeout, async {
-        loop {
-            if active.load(Ordering::Relaxed) == 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await;
-
-    match drain_result {
+    match tokio::time::timeout(timeout, tracker.wait_drained()).await {
         Ok(()) => {
             info!(port, "all connections drained");
         }
         Err(_) => {
-            let remaining = active.load(Ordering::Relaxed);
+            let remaining = tracker.active();
             warn!(
                 port,
                 remaining_connections = remaining,
@@ -953,20 +981,20 @@ async fn handle_client_connection(
     let peer = client_conn.peer_addr;
 
     // Find which container owns this port, get connection tracking and connect request channel
-    let (container_id, active_connections, connect_tx) = {
+    let (container_id, tracker, connect_tx) = {
         let s = state.lock().await;
         let cid = s.find_container_for_port(port).map(|s| s.to_string());
-        let active = cid.as_ref().and_then(|id| {
+        let trk = cid.as_ref().and_then(|id| {
             s.containers
                 .get(id)
                 .and_then(|c| c.forwards.get(&port))
-                .map(|f| Arc::clone(&f.active_connections))
+                .map(|f| Arc::clone(&f.tracker))
         });
         let tx = cid
             .as_ref()
             .and_then(|id| s.containers.get(id))
             .map(|c| c.connect_request_tx.clone());
-        (cid, active, tx)
+        (cid, trk, tx)
     };
 
     let container_id = match container_id {
@@ -986,8 +1014,8 @@ async fn handle_client_connection(
     };
 
     // Track this connection for drain support
-    if let Some(ref active) = active_connections {
-        active.fetch_add(1, Ordering::Relaxed);
+    if let Some(ref trk) = tracker {
+        trk.increment();
     }
 
     let conn_id = uuid::Uuid::new_v4().to_string();
@@ -1008,8 +1036,8 @@ async fn handle_client_connection(
     {
         warn!(conn_id, port, error = %e, "failed to queue ConnectRequest");
         proxy::cancel_pending(&pending, &conn_id).await;
-        if let Some(active) = active_connections {
-            active.fetch_sub(1, Ordering::Relaxed);
+        if let Some(trk) = tracker {
+            trk.decrement();
         }
         return;
     }
@@ -1031,7 +1059,7 @@ async fn handle_client_connection(
     }
 
     // Decrement active connection count
-    if let Some(active) = active_connections {
-        active.fetch_sub(1, Ordering::Relaxed);
+    if let Some(trk) = tracker {
+        trk.decrement();
     }
 }
