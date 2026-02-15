@@ -1,4 +1,4 @@
-# Devcontainer Bridge (`dbr`)
+# Development Containers Bridge (`dbr`)
 
 Automatic port forwarding and browser URL opening between devcontainers and the host machine.
 
