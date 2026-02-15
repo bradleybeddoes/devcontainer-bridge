@@ -103,8 +103,11 @@ pub async fn run_ensure(
         .to_string_lossy()
         .to_string();
 
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.arg("host-daemon")
+    // Use std::process::Command so the child is fully detached.
+    // tokio::process::Command installs a SIGCHLD reaper that warns
+    // when the Child handle is dropped without calling .wait().
+    let child = std::process::Command::new(&exe)
+        .arg("host-daemon")
         .arg("--control-port")
         .arg(control_port.to_string())
         .arg("--data-port")
@@ -113,22 +116,14 @@ pub async fn run_ensure(
         .arg(&log_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    let child = cmd
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| EnsureError::SpawnFailed(format!("{exe:?}: {e}")))?;
 
-    // Only write PID file when the PID is known; PID 0 is the kernel's
-    // process group and must never appear in a PID file.
     let pid = child.id();
-    if let Some(p) = pid {
-        info!(pid = p, "spawned host daemon process");
-        if let Err(e) = write_pid_file(p) {
-            debug!(error = %e, "could not write PID file (non-fatal)");
-        }
-    } else {
-        info!("spawned host daemon process (PID unavailable)");
+    info!(pid, "spawned host daemon process");
+    if let Err(e) = write_pid_file(pid) {
+        debug!(error = %e, "could not write PID file (non-fatal)");
     }
 
     // Step 4: Wait for daemon to become ready
@@ -147,12 +142,7 @@ pub async fn run_ensure(
                 if let Ok(Ok(Message::Pong)) =
                     tokio::time::timeout(Duration::from_secs(2), conn.recv()).await
                 {
-                    match pid {
-                        Some(p) => {
-                            println!("Host daemon started on port {control_port} (PID {p}).")
-                        }
-                        None => println!("Host daemon started on port {control_port}."),
-                    }
+                    println!("Host daemon started on port {control_port} (PID {pid}).");
                     return Ok(());
                 }
             }
