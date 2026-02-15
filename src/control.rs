@@ -88,7 +88,22 @@ pub async fn read_message<R: AsyncBufRead + Unpin>(
 
         let chunk_len = available.len();
         if line.len() + chunk_len > MAX_MESSAGE_SIZE {
+            // Drain the rest of the oversized line (up to the next newline
+            // or EOF) so subsequent reads on this connection don't parse
+            // the tail as a new message.
             reader.consume(chunk_len);
+            loop {
+                let rest = reader.fill_buf().await?;
+                if rest.is_empty() {
+                    break;
+                }
+                if let Some(nl) = rest.iter().position(|&b| b == b'\n') {
+                    reader.consume(nl + 1);
+                    break;
+                }
+                let n = rest.len();
+                reader.consume(n);
+            }
             return Err(ControlError::MessageTooLarge {
                 size: line.len() + chunk_len,
             });
@@ -256,6 +271,25 @@ mod tests {
         let mut reader = Cursor::new(large);
         let result = read_message(&mut reader).await;
         assert!(matches!(result, Err(ControlError::MessageTooLarge { .. })));
+    }
+
+    #[tokio::test]
+    async fn read_message_recovers_after_too_large() {
+        // An oversized line followed by a valid message — the reader
+        // should drain the oversized line and parse the next one cleanly.
+        let mut buf = vec![b'x'; MAX_MESSAGE_SIZE + 100];
+        buf.push(b'\n');
+        let mut valid = Vec::new();
+        write_message(&mut valid, &Message::Ping).await.unwrap();
+        buf.extend_from_slice(&valid);
+
+        let mut reader = Cursor::new(buf);
+        let err = read_message(&mut reader).await;
+        assert!(matches!(err, Err(ControlError::MessageTooLarge { .. })));
+
+        // The next read should succeed with the valid message
+        let msg = read_message(&mut reader).await.unwrap();
+        assert_eq!(msg, Message::Ping);
     }
 
     #[tokio::test]
