@@ -41,7 +41,7 @@ pub enum EnsureError {
     /// The spawned daemon did not become ready within the timeout.
     #[error(
         "host daemon did not become ready within {timeout_secs}s after spawning. \
-         Check logs for errors."
+         Check ~/.config/dbr/daemon.log for errors."
     )]
     SpawnTimeout {
         /// How long we waited.
@@ -98,12 +98,19 @@ pub async fn run_ensure(
     // Step 2: Spawn the host daemon as a background process
     let exe = std::env::current_exe().map_err(|e| EnsureError::SpawnFailed(e.to_string()))?;
 
+    let log_path = pid_file_path()?
+        .with_file_name("daemon.log")
+        .to_string_lossy()
+        .to_string();
+
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("host-daemon")
         .arg("--control-port")
         .arg(control_port.to_string())
         .arg("--data-port")
         .arg(data_port.to_string())
+        .arg("--log-file")
+        .arg(&log_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -112,12 +119,16 @@ pub async fn run_ensure(
         .spawn()
         .map_err(|e| EnsureError::SpawnFailed(format!("{exe:?}: {e}")))?;
 
-    let pid = child.id().unwrap_or(0);
-    info!(pid, "spawned host daemon process");
-
-    // Step 3: Write PID file
-    if let Err(e) = write_pid_file(pid) {
-        debug!(error = %e, "could not write PID file (non-fatal)");
+    // Only write PID file when the PID is known; PID 0 is the kernel's
+    // process group and must never appear in a PID file.
+    let pid = child.id();
+    if let Some(p) = pid {
+        info!(pid = p, "spawned host daemon process");
+        if let Err(e) = write_pid_file(p) {
+            debug!(error = %e, "could not write PID file (non-fatal)");
+        }
+    } else {
+        info!("spawned host daemon process (PID unavailable)");
     }
 
     // Step 4: Wait for daemon to become ready
@@ -136,7 +147,12 @@ pub async fn run_ensure(
                 if let Ok(Ok(Message::Pong)) =
                     tokio::time::timeout(Duration::from_secs(2), conn.recv()).await
                 {
-                    println!("Host daemon started on port {control_port} (PID {pid}).");
+                    match pid {
+                        Some(p) => {
+                            println!("Host daemon started on port {control_port} (PID {p}).")
+                        }
+                        None => println!("Host daemon started on port {control_port}."),
+                    }
                     return Ok(());
                 }
             }
