@@ -89,6 +89,10 @@ enum ForwardError {
     #[error("no available host ports")]
     NoAvailablePorts,
 
+    /// The container was removed while setting up the forward.
+    #[error("container disconnected during forward setup")]
+    ContainerGone,
+
     /// Failed to bind the per-port listener.
     #[error(transparent)]
     Listener(#[from] ListenerError),
@@ -1031,6 +1035,7 @@ async fn handle_forward(
         // re-acquisition — shut down the orphaned listener.
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
+        return Err(ForwardError::ContainerGone);
     }
 
     Ok(host_port)
@@ -1237,7 +1242,16 @@ async fn handle_client_connection(client_conn: ClientConnection, ctx: &DaemonCon
     // Register pending connection, then send ConnectRequest to the container
     // via its control channel. The container will open a reverse data connection
     // back to the host data port with a ConnectReady handshake.
-    let data_rx = register_pending(&ctx.pending, conn_id.clone()).await;
+    let data_rx = match register_pending(&ctx.pending, conn_id.clone()).await {
+        Some(rx) => rx,
+        None => {
+            warn!(conn_id, port, "pending connections at capacity");
+            if let Some(trk) = tracker {
+                trk.decrement();
+            }
+            return;
+        }
+    };
 
     // Send ConnectRequest to the container's control message loop
     if let Err(e) = connect_tx
