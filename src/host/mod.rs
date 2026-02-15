@@ -939,11 +939,14 @@ async fn handle_forward(
     state: &Mutex<HostState>,
     client_tx: &mpsc::Sender<ClientConnection>,
 ) -> Result<u16, ForwardError> {
-    // Enforce per-container forward limit
-    {
-        let s = state.lock().await;
-        if let Some(cstate) = s.containers.get(container_id) {
-            if cstate.forwards.len() >= MAX_FORWARDS_PER_CONTAINER {
+    // Check forward limit and tear down any existing forward for this port
+    // so a duplicate Forward doesn't leak the old used_host_ports entry.
+    let old_forward = {
+        let mut s = state.lock().await;
+        if let Some(cstate) = s.containers.get_mut(container_id) {
+            if cstate.forwards.len() >= MAX_FORWARDS_PER_CONTAINER
+                && !cstate.forwards.contains_key(&port)
+            {
                 warn!(
                     container_id,
                     port,
@@ -954,7 +957,20 @@ async fn handle_forward(
                     max: MAX_FORWARDS_PER_CONTAINER,
                 });
             }
+            cstate.forwards.remove(&port).inspect(|fstate| {
+                s.used_host_ports.remove(&fstate.host_port);
+            })
+        } else {
+            None
         }
+    };
+
+    // Tear down the old forward outside the lock
+    if let Some(old) = old_forward {
+        debug!(container_id, port, "replacing existing forward");
+        let _ = old.shutdown_tx.send(true);
+        let _ = old.handle.await;
+        drain_forward_connections(&old.tracker, port, DEFAULT_DRAIN_TIMEOUT).await;
     }
 
     let target_port = {
