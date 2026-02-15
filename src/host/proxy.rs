@@ -89,20 +89,23 @@ const MAX_PENDING: usize = 1024;
 pub async fn register_pending(
     pending: &PendingConnections,
     conn_id: String,
-) -> oneshot::Receiver<DataStream> {
+) -> Option<oneshot::Receiver<DataStream>> {
     let (tx, rx) = oneshot::channel();
     let mut map = pending.lock().await;
     if map.len() >= MAX_PENDING {
-        warn!(
-            pending_count = map.len(),
-            max = MAX_PENDING,
-            "pending connections at capacity, pruning stale entries"
-        );
         // Prune entries whose receiver has been dropped (timed out)
         map.retain(|_id, sender| !sender.is_closed());
+        if map.len() >= MAX_PENDING {
+            warn!(
+                pending_count = map.len(),
+                max = MAX_PENDING,
+                "pending connections at capacity, rejecting new connection"
+            );
+            return None;
+        }
     }
     map.insert(conn_id, tx);
-    rx
+    Some(rx)
 }
 
 /// Resolve a pending connection when a `ConnectReady` arrives on the data port.
@@ -236,7 +239,7 @@ mod tests {
         let pending = new_pending_connections();
         let conn_id = "test-123".to_string();
 
-        let rx = register_pending(&pending, conn_id.clone()).await;
+        let rx = register_pending(&pending, conn_id.clone()).await.unwrap();
 
         let (stream, _peer) = tcp_pair().await;
         let data = DataStream {
@@ -263,7 +266,9 @@ mod tests {
     #[tokio::test]
     async fn cancel_pending_removes_entry() {
         let pending = new_pending_connections();
-        let _rx = register_pending(&pending, "cancel-me".to_string()).await;
+        let _rx = register_pending(&pending, "cancel-me".to_string())
+            .await
+            .unwrap();
 
         assert_eq!(pending.lock().await.len(), 1);
         cancel_pending(&pending, "cancel-me").await;
@@ -275,7 +280,7 @@ mod tests {
         let pending = new_pending_connections();
         let conn_id = "bridge-test".to_string();
 
-        let data_rx = register_pending(&pending, conn_id.clone()).await;
+        let data_rx = register_pending(&pending, conn_id.clone()).await.unwrap();
 
         // Set up a client pair (simulates client connecting to forwarded port)
         let (client_stream, mut client_local) = tcp_pair().await;
@@ -322,7 +327,7 @@ mod tests {
         let pending = new_pending_connections();
         let conn_id = "timeout-test".to_string();
 
-        let data_rx = register_pending(&pending, conn_id.clone()).await;
+        let data_rx = register_pending(&pending, conn_id.clone()).await.unwrap();
 
         let (client_stream, _peer) = tcp_pair().await;
 

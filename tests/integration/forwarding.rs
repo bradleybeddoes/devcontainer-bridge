@@ -513,7 +513,7 @@ async fn test_reverse_proxy_pipeline() {
     let conn_id = "test-conn-001".to_string();
 
     // 5. Register the pending connection (host side)
-    let data_rx = register_pending(&pending, conn_id.clone()).await;
+    let data_rx = register_pending(&pending, conn_id.clone()).await.unwrap();
 
     // 6. Simulate container-side behavior: connect to echo server AND open
     //    a "data connection" back to the host, send ConnectReady handshake
@@ -977,7 +977,7 @@ async fn test_proxy_bridge_timeout() {
     let pending = new_pending_connections();
     let conn_id = "timeout-test".to_string();
 
-    let data_rx = register_pending(&pending, conn_id.clone()).await;
+    let data_rx = register_pending(&pending, conn_id.clone()).await.unwrap();
     let (client_stream, _client_end) = tcp_pair().await;
 
     // Bridge should timeout since no one resolves the pending connection.
