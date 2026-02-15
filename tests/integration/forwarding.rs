@@ -94,11 +94,11 @@ async fn register_container(
 }
 
 /// Helper: try connecting to a port on loopback, return true if successful.
-/// Tries both [::1] and 127.0.0.1 since the host listener prefers IPv6.
+/// Tries IPv4 first (matching production `bind_loopback` preference), then IPv6.
 async fn can_connect_port(port: u16) -> bool {
     let addrs: &[SocketAddr] = &[
-        ([0, 0, 0, 0, 0, 0, 0, 1], port).into(),
         ([127, 0, 0, 1], port).into(),
+        ([0, 0, 0, 0, 0, 0, 0, 1], port).into(),
     ];
     tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(addrs))
         .await
