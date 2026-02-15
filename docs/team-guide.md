@@ -18,21 +18,22 @@ Add the `dbr` feature to your shared `devcontainer.json`:
 }
 ```
 
-This installs two files inside the container:
+This installs the following inside the container:
 
 - `/usr/local/bin/dbr` -- the main binary
 - `/usr/local/bin/dbr-open` -- a hardlink used for browser integration
+- `/usr/local/bin/dbr-start-daemon` -- idempotent daemon starter
+- `/etc/profile.d/dbr.sh` -- auto-starts the daemon on interactive shell login
 
-The feature **only installs the binary**. It does not:
+The feature also declares a `postStartCommand` that starts the container daemon
+when the container boots via `devcontainer up`.
 
-- Start any background process
-- Set any environment variables
-- Modify any configuration files
-- Listen on any ports
+The feature does not:
+
+- Set any user environment variables (terminal developers set `BROWSER=dbr-open`
+  in their personal dotfiles)
+- Listen on any ports (the container daemon only initiates outbound connections)
 - Interfere with VS Code's port forwarding
-
-The binary is completely inert unless a developer explicitly starts the
-container daemon.
 
 ---
 
@@ -46,16 +47,18 @@ present but not running.
 
 Specifically:
 
-- **No background processes** -- `dbr` does not start automatically. It must be
-  invoked explicitly by a terminal developer's shell function (e.g., `dcup`).
+- **No impact on VS Code workflows** -- the container daemon runs in the
+  background but only initiates outbound TCP connections to the host. It binds
+  no ports and consumes negligible resources when idle.
 - **No port conflicts** -- VS Code's port forwarding and `dbr` operate
   independently. Even if both were running (unlikely), they bind to different
   mechanisms (VS Code uses its own tunnel; `dbr` uses TCP on loopback).
 - **No environment changes** -- The feature does not set `BROWSER` or any other
   variable. Terminal developers set `BROWSER=dbr-open` in their personal
   dotfiles, which VS Code does not load.
-- **No container startup impact** -- The feature runs only at build time (a
-  single binary copy). It adds zero time to container startup.
+- **Negligible startup cost** -- The container daemon starts in the background
+  and registers with the host in under a second. If no host daemon is running,
+  it reconnects silently with exponential backoff.
 - **No network changes** -- The feature does not modify Docker networking,
   published ports, or `forwardPorts` in `devcontainer.json`.
 
@@ -69,8 +72,9 @@ it is there.
 Terminal developers who use the devcontainer CLI and tmux add two things to
 their personal setup (not shared config):
 
-1. **Shell functions** (`dcup`/`dctmux` aliases) that start the host and
-   container daemons. See the [CLI Guide](cli-guide.md) for details.
+1. **Shell integration** -- calling `dbr ensure` before `devcontainer up` to
+   start the host daemon. See the [CLI Guide](cli-guide.md) for details. The
+   container daemon starts automatically via the feature.
 
 2. **Dotfiles** with `export BROWSER=dbr-open` in their shell profile for
    browser integration.
