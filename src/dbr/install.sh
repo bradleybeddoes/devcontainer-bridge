@@ -108,8 +108,13 @@ cat > "${INSTALL_DIR}/dbr-start-daemon" << 'WRAPPER_EOF'
 # Start the container daemon if not already running.
 # Used by the devcontainer feature postStartCommand to auto-start
 # the daemon on container boot. Safe to call multiple times.
+DBR_LOG="/tmp/dbr-daemon.log"
 if ! pgrep -f "dbr container-daemon" >/dev/null 2>&1; then
-  nohup dbr container-daemon --log-level warn >/dev/null 2>&1 &
+  echo "[$(date -Iseconds)] dbr-start-daemon: starting container daemon (pid $$, ppid $PPID)" >> "$DBR_LOG"
+  nohup dbr container-daemon --log-level debug >> "$DBR_LOG" 2>&1 &
+  echo "[$(date -Iseconds)] dbr-start-daemon: launched pid $!" >> "$DBR_LOG"
+else
+  echo "[$(date -Iseconds)] dbr-start-daemon: daemon already running" >> "$DBR_LOG"
 fi
 WRAPPER_EOF
 chmod +x "${INSTALL_DIR}/dbr-start-daemon"
