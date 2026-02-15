@@ -313,6 +313,9 @@ fn format_since(since: &str) -> String {
 }
 
 /// Connect to the host daemon and send a manual `Forward` request.
+///
+/// Keeps the connection alive until Ctrl-C so the forward persists.
+/// On exit, sends an `Unforward` to clean up.
 async fn run_forward(host: std::net::IpAddr, port: u16, control_port: u16) -> Result<(), CliError> {
     let mut conn = connect_to_host(host, control_port)
         .await
@@ -334,18 +337,51 @@ async fn run_forward(host: std::net::IpAddr, port: u16, control_port: u16) -> Re
             ..
         } => {
             println!("Forwarding port {port} → host port {host_port}");
-            Ok(())
+            println!("Press Ctrl-C to stop forwarding.");
         }
-        Message::ForwardAck { success: false, .. } => Err(CliError::Connection(format!(
-            "host daemon failed to forward port {port}"
-        ))),
-        other => Err(CliError::Connection(format!(
-            "unexpected response: {other:?}"
-        ))),
+        Message::ForwardAck { success: false, .. } => {
+            return Err(CliError::Connection(format!(
+                "host daemon failed to forward port {port}"
+            )));
+        }
+        other => {
+            return Err(CliError::Connection(format!(
+                "unexpected response: {other:?}"
+            )));
+        }
+    }
+
+    // Keep the connection alive until Ctrl-C, responding to Pings
+    // from the host daemon so the heartbeat doesn't expire.
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                let _ = conn.send(&Message::Unforward { port }).await;
+                println!("Stopped forwarding port {port}.");
+                return Ok(());
+            }
+            msg = conn.recv() => {
+                match msg {
+                    Ok(Message::Ping) => {
+                        let _ = conn.send(&Message::Pong).await;
+                    }
+                    Err(_) => {
+                        return Err(CliError::Connection(
+                            "lost connection to host daemon".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
 /// Connect to the host daemon and send a manual `Unforward` request.
+///
+/// Sends `Unforward` as the first message (no registration needed).
+/// The host daemon handles this as a one-shot administrative command
+/// that searches all containers for the port.
 async fn run_unforward(
     host: std::net::IpAddr,
     port: u16,
@@ -354,7 +390,6 @@ async fn run_unforward(
     let mut conn = connect_to_host(host, control_port)
         .await
         .map_err(CliError::Connection)?;
-    register_cli_client(&mut conn).await?;
 
     conn.send(&Message::Unforward { port }).await?;
     println!("Unforward request sent for port {port}");
