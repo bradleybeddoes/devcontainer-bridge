@@ -1,0 +1,553 @@
+//! Container-side daemon for devcontainer-bridge.
+//!
+//! Runs inside a Linux devcontainer. Connects to the host daemon's control
+//! channel, registers, scans for listening ports, and handles reverse data
+//! connection requests.
+
+pub mod browser;
+pub mod data;
+pub mod filter;
+pub mod scanner;
+
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::path::Path;
+use std::time::Duration;
+
+use thiserror::Error;
+use tracing::{debug, error, info, warn};
+
+use crate::config::Config;
+use crate::control::{self, ControlConnection, ControlError};
+use crate::protocol::{Message, Protocol};
+
+use self::data::spawn_connect_handler;
+use self::filter::PortFilter;
+use self::scanner::{ListeningPort, ScanError};
+
+/// Errors that can occur in the container daemon.
+#[derive(Debug, Error)]
+pub enum ContainerError {
+    /// Failed to resolve the host address.
+    #[error("could not resolve host address. Tried: {attempts}. Set --host-addr or DCBRIDGE_HOST")]
+    HostResolution {
+        /// Description of what was tried.
+        attempts: String,
+    },
+
+    /// Failed to connect to the host control channel.
+    #[error("failed to connect to host at {addr}: {source}")]
+    Connect {
+        /// The address we tried to connect to.
+        addr: SocketAddr,
+        /// The underlying error.
+        source: ControlError,
+    },
+
+    /// Control channel error during operation.
+    #[error("control channel error: {0}")]
+    Control(#[from] ControlError),
+
+    /// Port scanning error.
+    #[error("scan error: {0}")]
+    Scan(#[from] ScanError),
+
+    /// Port filter configuration error.
+    #[error("filter error: {0}")]
+    Filter(#[from] filter::FilterError),
+
+    /// I/O error.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Resolve the host address using the resolution chain:
+/// 1. CLI flag (`config.host_addr`)
+/// 2. `DCBRIDGE_HOST` env var (already loaded into config)
+/// 3. `host.docker.internal` DNS resolution
+/// 4. Docker gateway IP from default route
+/// 5. Fail with actionable error
+///
+/// # Errors
+///
+/// Returns [`ContainerError::HostResolution`] if no method succeeds.
+pub async fn resolve_host_addr(config: &Config) -> Result<String, ContainerError> {
+    let mut attempts = Vec::new();
+
+    // 1 & 2: CLI flag / env var (both stored in config.host_addr)
+    if let Some(ref addr) = config.host_addr {
+        return Ok(addr.clone());
+    }
+    attempts.push("--host-addr flag / DCBRIDGE_HOST env");
+
+    // 3: Try host.docker.internal DNS
+    match tokio::net::lookup_host("host.docker.internal:0").await {
+        Ok(mut addrs) => {
+            if let Some(addr) = addrs.next() {
+                let host = addr.ip().to_string();
+                info!(host = %host, "resolved host via host.docker.internal");
+                return Ok(host);
+            }
+        }
+        Err(e) => {
+            debug!(error = %e, "host.docker.internal DNS lookup failed");
+        }
+    }
+    attempts.push("host.docker.internal DNS");
+
+    // 4: Docker gateway IP from default route
+    match resolve_gateway_ip().await {
+        Some(ip) => {
+            info!(host = %ip, "resolved host via default route gateway");
+            return Ok(ip);
+        }
+        None => {
+            debug!("could not determine gateway IP from default route");
+        }
+    }
+    attempts.push("gateway IP from default route");
+
+    Err(ContainerError::HostResolution {
+        attempts: attempts.join(", "),
+    })
+}
+
+/// Try to extract the gateway IP from the default route.
+///
+/// Runs `ip route` and parses `default via <IP>`.
+async fn resolve_gateway_ip() -> Option<String> {
+    let output = tokio::process::Command::new("ip")
+        .arg("route")
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some("default"), Some("via"), Some(ip)) => Some(ip.to_owned()),
+                _ => None,
+            }
+        })
+        .next()
+}
+
+/// Get the container ID, preferring the hostname.
+///
+/// In Docker, the hostname is typically set to the container short ID.
+fn get_container_id() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// Run the container daemon main loop.
+///
+/// Connects to the host daemon, registers, starts scanning for ports,
+/// and handles incoming `ConnectRequest` messages.
+///
+/// # Arguments
+///
+/// * `config` — Runtime configuration (host address, ports, scan interval, etc.)
+/// * `shutdown` — A future that resolves when the daemon should shut down.
+///
+/// # Errors
+///
+/// Returns [`ContainerError`] on fatal errors (host resolution failure,
+/// unrecoverable control channel errors).
+pub async fn run(
+    config: Config,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), ContainerError> {
+    // Set up an internal shutdown channel that merges external shutdown
+    // with Unix signals (SIGTERM, SIGHUP) and parent PID reparenting.
+    let (internal_tx, internal_rx) = tokio::sync::watch::channel(false);
+
+    // Forward the external shutdown signal
+    let mut external_rx = shutdown.clone();
+    let tx_external = internal_tx.clone();
+    tokio::spawn(async move {
+        let _ = external_rx.changed().await;
+        let _ = tx_external.send(true);
+    });
+
+    // Handle SIGTERM and SIGHUP (Unix-only, which is fine — container daemon
+    // always runs inside a Linux devcontainer)
+    #[cfg(unix)]
+    {
+        let tx_term = internal_tx.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(error = %e, "failed to register SIGTERM handler");
+                        return;
+                    }
+                };
+            sigterm.recv().await;
+            info!("received SIGTERM, shutting down");
+            let _ = tx_term.send(true);
+        });
+
+        let tx_hup = internal_tx.clone();
+        tokio::spawn(async move {
+            let mut sighup =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(error = %e, "failed to register SIGHUP handler");
+                        return;
+                    }
+                };
+            sighup.recv().await;
+            info!("received SIGHUP, shutting down");
+            let _ = tx_hup.send(true);
+        });
+    }
+
+    // Monitor parent PID — if it changes to 1 (reparented to init),
+    // the container is shutting down. Poll every 5 seconds.
+    #[cfg(unix)]
+    {
+        let tx_ppid = internal_tx.clone();
+        let initial_ppid = std::os::unix::process::parent_id();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let current_ppid = std::os::unix::process::parent_id();
+                if current_ppid != initial_ppid {
+                    info!(
+                        initial_ppid,
+                        current_ppid, "parent PID changed (reparented), shutting down"
+                    );
+                    let _ = tx_ppid.send(true);
+                    return;
+                }
+            }
+        });
+    }
+
+    // Drop the original tx so the channel closes when all senders are dropped
+    drop(internal_tx);
+
+    let mut shutdown = internal_rx;
+    let host_addr_str = resolve_host_addr(&config).await?;
+    let parse_addr = |port: u16| -> Result<SocketAddr, ContainerError> {
+        format!("{host_addr_str}:{port}")
+            .parse()
+            .map_err(|e: std::net::AddrParseError| {
+                ContainerError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+            })
+    };
+    let control_addr = parse_addr(config.control_port)?;
+    let data_addr = parse_addr(config.data_port)?;
+
+    let scan_interval = Duration::from_millis(config.scan_interval_ms);
+    let proc_path = Path::new("/proc");
+
+    // Build the set of ports to exclude from scanning (self-exclusion of control/data ports)
+    let mut exclude_ports: HashSet<u16> = config.exclude_ports.iter().copied().collect();
+    exclude_ports.insert(config.control_port);
+    exclude_ports.insert(config.data_port);
+
+    // Build the port filter for include/exclude/process-regex filtering.
+    // exclude_process and devcontainer.json path will be wired via CLI flags later;
+    // for now, the filter handles exclude_ports and include_ports from config.
+    let port_filter = PortFilter::new(
+        &exclude_ports.iter().copied().collect::<Vec<_>>(),
+        &config.include_ports,
+        None,
+        None,
+    )?;
+
+    // Exponential backoff state: 100ms initial, 5s cap, doubles on failure
+    const BACKOFF_INITIAL: Duration = Duration::from_millis(100);
+    const BACKOFF_MAX: Duration = Duration::from_secs(5);
+    let mut backoff = BACKOFF_INITIAL;
+
+    // Track ports across reconnections so we can re-Forward them
+    let mut last_forwarded: HashMap<u16, ListeningPort> = HashMap::new();
+
+    // Main reconnection loop
+    loop {
+        info!(%control_addr, "connecting to host daemon");
+
+        let mut conn = match control::connect(control_addr).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, backoff_ms = backoff.as_millis(), "failed to connect to host, retrying");
+                if backoff_or_shutdown(&mut backoff, BACKOFF_MAX, &mut shutdown).await {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+
+        // Register with the host
+        let container_id = get_container_id();
+
+        info!(%container_id, "registering with host daemon");
+        if let Err(e) = conn
+            .send(&Message::Register {
+                container_id: container_id.clone(),
+                hostname: container_id.clone(),
+            })
+            .await
+        {
+            warn!(error = %e, "failed to send Register, reconnecting");
+            backoff = (backoff * 2).min(BACKOFF_MAX);
+            continue;
+        }
+
+        // Wait for RegisterAck
+        match conn.recv().await {
+            Ok(Message::RegisterAck { success: true }) => {
+                info!("registered successfully");
+            }
+            Ok(Message::RegisterAck { success: false }) => {
+                error!("registration rejected by host");
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                continue;
+            }
+            Ok(other) => {
+                warn!(?other, "unexpected message, expected RegisterAck");
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                continue;
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to receive RegisterAck");
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                continue;
+            }
+        }
+
+        // Connected successfully — reset backoff
+        backoff = BACKOFF_INITIAL;
+
+        // Re-Forward all previously tracked ports after reconnection
+        if !last_forwarded.is_empty() {
+            info!(
+                count = last_forwarded.len(),
+                "re-forwarding ports after reconnect"
+            );
+            let re_forward_failed = re_forward_ports(&mut conn, &last_forwarded).await;
+            if re_forward_failed {
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                continue;
+            }
+        }
+
+        let session_params = SessionParams {
+            data_addr,
+            proc_path,
+            exclude_ports: &exclude_ports,
+            port_filter: &port_filter,
+            scan_interval,
+        };
+
+        // Run the connected session, passing in previously forwarded ports
+        let result = run_session(&mut conn, &session_params, &mut shutdown, last_forwarded).await;
+
+        match result {
+            Ok((SessionExit::Shutdown, _)) => {
+                info!("shutdown signal received, exiting");
+                return Ok(());
+            }
+            Ok((SessionExit::Disconnected, forwarded)) | Err((_, forwarded)) => {
+                last_forwarded = forwarded;
+                if backoff_or_shutdown(&mut backoff, BACKOFF_MAX, &mut shutdown).await {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Sleep for `backoff` duration (doubling it afterward), or return early if
+/// a shutdown signal arrives. Returns `true` if shutdown was requested.
+async fn backoff_or_shutdown(
+    backoff: &mut Duration,
+    max: Duration,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(*backoff) => {
+            *backoff = (*backoff * 2).min(max);
+            false
+        }
+        _ = shutdown.changed() => {
+            info!("shutdown signal received during backoff");
+            true
+        }
+    }
+}
+
+/// Re-forward all previously tracked ports. Returns `true` if any send failed.
+async fn re_forward_ports(
+    conn: &mut ControlConnection,
+    forwarded: &HashMap<u16, ListeningPort>,
+) -> bool {
+    for (&port, lp) in forwarded {
+        let msg = Message::Forward {
+            port,
+            protocol: Protocol::Tcp,
+            process_name: lp.process_name.clone(),
+            pid: lp.pid,
+        };
+        if let Err(e) = conn.send(&msg).await {
+            warn!(port, error = %e, "failed to re-Forward port");
+            return true;
+        }
+    }
+    false
+}
+
+/// Reason the session ended normally.
+enum SessionExit {
+    /// A shutdown signal was received.
+    Shutdown,
+    /// The control connection was lost.
+    Disconnected,
+}
+
+/// Parameters for a connected session, grouping values that don't change
+/// between reconnections.
+struct SessionParams<'a> {
+    data_addr: SocketAddr,
+    proc_path: &'a Path,
+    exclude_ports: &'a HashSet<u16>,
+    port_filter: &'a PortFilter,
+    scan_interval: Duration,
+}
+
+/// Run a single connected session with the host daemon.
+///
+/// Scans for ports, sends Forward/Unforward diffs, and handles
+/// incoming ConnectRequest messages. Returns the forwarded ports map
+/// along with the exit reason so the caller can re-Forward them on reconnect.
+async fn run_session(
+    conn: &mut ControlConnection,
+    params: &SessionParams<'_>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    initial_forwarded: HashMap<u16, ListeningPort>,
+) -> Result<(SessionExit, HashMap<u16, ListeningPort>), (ContainerError, HashMap<u16, ListeningPort>)>
+{
+    // Track currently forwarded ports (initialized from previous session on reconnect)
+    let mut forwarded = initial_forwarded;
+    let mut scan_ticker = tokio::time::interval(params.scan_interval);
+
+    loop {
+        tokio::select! {
+            _ = scan_ticker.tick() => {
+                // Scan for listening ports
+                let current = match scanner::scan_listening_ports(params.proc_path, params.exclude_ports).await {
+                    Ok(ports) => ports,
+                    Err(e) => {
+                        debug!(error = %e, "scan failed, skipping this cycle");
+                        continue;
+                    }
+                };
+
+                // Apply port filter (exclude, include, process regex)
+                let filtered = params.port_filter.filter(current);
+                let current_map: HashMap<u16, &ListeningPort> = filtered
+                    .iter()
+                    .map(|lp| (lp.port, lp))
+                    .collect();
+
+                // Detect new ports
+                for (port, lp) in &current_map {
+                    if !forwarded.contains_key(port) {
+                        info!(port, process = ?lp.process_name, "new listening port detected");
+                        let msg = Message::Forward {
+                            port: *port,
+                            protocol: Protocol::Tcp,
+                            process_name: lp.process_name.clone(),
+                            pid: lp.pid,
+                        };
+                        if let Err(e) = conn.send(&msg).await {
+                            warn!(port, error = %e, "failed to send Forward");
+                            return Err((ContainerError::Control(e), forwarded));
+                        }
+                        forwarded.insert(*port, (*lp).clone());
+                    }
+                }
+
+                // Detect removed ports
+                let removed: Vec<u16> = forwarded
+                    .keys()
+                    .filter(|p| !current_map.contains_key(p))
+                    .copied()
+                    .collect();
+
+                for port in removed {
+                    info!(port, "listening port removed");
+                    let msg = Message::Unforward { port };
+                    if let Err(e) = conn.send(&msg).await {
+                        warn!(port, error = %e, "failed to send Unforward");
+                        return Err((ContainerError::Control(e), forwarded));
+                    }
+                    forwarded.remove(&port);
+                }
+            }
+
+            msg_result = conn.recv() => {
+                match msg_result {
+                    Ok(Message::ConnectRequest { port, conn_id }) => {
+                        info!(port, %conn_id, "received ConnectRequest");
+                        spawn_connect_handler(port, conn_id, params.data_addr);
+                    }
+                    Ok(Message::Ping) => {
+                        debug!("received Ping, sending Pong");
+                        if let Err(e) = conn.send(&Message::Pong).await {
+                            warn!(error = %e, "failed to send Pong");
+                            return Err((ContainerError::Control(e), forwarded));
+                        }
+                    }
+                    Ok(Message::ForwardAck { port, success, host_port }) => {
+                        if success {
+                            info!(port, host_port, "forward acknowledged");
+                        } else {
+                            warn!(port, "forward request rejected by host");
+                            forwarded.remove(&port);
+                        }
+                    }
+                    Ok(other) => {
+                        debug!(?other, "ignoring unexpected message");
+                    }
+                    Err(ControlError::ConnectionClosed) => {
+                        warn!("control connection closed by host");
+                        return Ok((SessionExit::Disconnected, forwarded));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "control channel error");
+                        return Err((ContainerError::Control(e), forwarded));
+                    }
+                }
+            }
+
+            _ = shutdown.changed() => {
+                // Send Unforward for all active ports before shutting down
+                for &port in forwarded.keys() {
+                    let msg = Message::Unforward { port };
+                    if let Err(e) = conn.send(&msg).await {
+                        debug!(port, error = %e, "failed to send Unforward during shutdown");
+                    }
+                }
+                return Ok((SessionExit::Shutdown, forwarded));
+            }
+        }
+    }
+}
