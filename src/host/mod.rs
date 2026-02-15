@@ -999,9 +999,14 @@ async fn handle_forward(
                 tracker,
             },
         );
+        s.used_host_ports
+            .insert(host_port, container_id.to_string());
+    } else {
+        // Container disappeared between start_listener and lock
+        // re-acquisition — shut down the orphaned listener.
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
     }
-    s.used_host_ports
-        .insert(host_port, container_id.to_string());
 
     Ok(host_port)
 }
