@@ -1014,7 +1014,8 @@ async fn handle_forward(
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (host_port, handle) = start_listener(target_port, shutdown_rx, client_tx.clone()).await?;
+    let (host_port, handle) =
+        start_listener(target_port, port, shutdown_rx, client_tx.clone()).await?;
 
     let now = timestamp_now();
     let tracker = Arc::new(ConnectionTracker::new());

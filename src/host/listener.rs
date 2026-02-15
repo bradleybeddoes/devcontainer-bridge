@@ -79,13 +79,14 @@ async fn bind_loopback(port: u16) -> Result<TcpListener, ListenerError> {
 /// Returns [`ListenerError::Bind`] if the port cannot be bound.
 pub async fn start_listener(
     port: u16,
+    container_port: u16,
     mut shutdown_rx: watch::Receiver<bool>,
     client_tx: mpsc::Sender<ClientConnection>,
 ) -> Result<(u16, tokio::task::JoinHandle<()>), ListenerError> {
     let listener = bind_loopback(port).await?;
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
 
-    info!(container_port = port, bound_port, "started port listener");
+    info!(container_port, bound_port, "started port listener");
 
     let handle = tokio::spawn(async move {
         loop {
@@ -110,7 +111,7 @@ pub async fn start_listener(
                             debug!(port, %peer_addr, "accepted client connection");
                             let conn = ClientConnection {
                                 stream,
-                                container_port: port,
+                                container_port,
                                 peer_addr,
                             };
                             if client_tx.send(conn).await.is_err() {
@@ -150,7 +151,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (tx, mut rx) = mpsc::channel(16);
 
-        let (bound_port, handle) = start_listener(0, shutdown_rx, tx).await.unwrap();
+        let (bound_port, handle) = start_listener(0, 8080, shutdown_rx, tx).await.unwrap();
         assert!(bound_port > 0);
 
         // Connect a client — try 127.0.0.1 first since bind_loopback prefers IPv4
@@ -163,7 +164,7 @@ mod tests {
 
         // Should receive the connection on the channel
         let conn = rx.recv().await.expect("should receive client connection");
-        assert_eq!(conn.container_port, 0); // port 0 was requested
+        assert_eq!(conn.container_port, 8080); // original container port preserved
 
         // Verify we can read from the accepted stream
         let mut buf = [0u8; 5];
@@ -180,7 +181,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (tx, _rx) = mpsc::channel(16);
 
-        let (_bound_port, handle) = start_listener(0, shutdown_rx, tx).await.unwrap();
+        let (_bound_port, handle) = start_listener(0, 8080, shutdown_rx, tx).await.unwrap();
 
         let _ = shutdown_tx.send(true);
         tokio::time::timeout(std::time::Duration::from_secs(2), handle)
