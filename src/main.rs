@@ -357,7 +357,7 @@ async fn run_unforward(
     register_cli_client(&mut conn).await?;
 
     conn.send(&Message::Unforward { port }).await?;
-    println!("Removed forward for port {port}");
+    println!("Unforward request sent for port {port}");
     Ok(())
 }
 
