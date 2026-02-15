@@ -62,6 +62,13 @@ pub enum EnsureError {
 /// 4. Write PID file to `~/.config/dbr/daemon.pid`
 /// 5. If port in use by non-dbr process → fail with actionable error
 ///
+/// # Race conditions
+///
+/// Between spawning the daemon and the first readiness check, another
+/// process could bind the control port. The Ping/Pong verification
+/// mitigates this — a non-dbr service will not respond with `Pong`,
+/// causing the check to fail with [`EnsureError::PortConflict`].
+///
 /// # Errors
 ///
 /// Returns [`EnsureError`] if the daemon cannot be started or verified.
