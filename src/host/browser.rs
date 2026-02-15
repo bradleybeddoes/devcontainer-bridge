@@ -11,8 +11,7 @@ use std::time::Instant;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-/// Maximum allowed URL length in characters.
-const MAX_URL_LENGTH: usize = 2048;
+use crate::protocol;
 
 /// Maximum number of browser opens per second.
 const RATE_LIMIT_PER_SEC: usize = 5;
@@ -20,22 +19,9 @@ const RATE_LIMIT_PER_SEC: usize = 5;
 /// Errors that can occur when opening a URL in the host browser.
 #[derive(Debug, Error)]
 pub enum BrowserError {
-    /// The URL scheme is not `http://` or `https://`.
-    #[error("invalid URL scheme: only http:// and https:// are allowed")]
-    InvalidScheme,
-
-    /// The URL exceeds the maximum allowed length.
-    #[error("URL too long: {len} chars exceeds {max} char limit")]
-    UrlTooLong {
-        /// Actual length of the URL.
-        len: usize,
-        /// Maximum allowed length.
-        max: usize,
-    },
-
-    /// The URL contains control characters (newlines, null bytes, etc.).
-    #[error("URL contains invalid characters (control characters are not allowed)")]
-    InvalidCharacters,
+    /// The URL failed validation (empty, bad scheme, too long, or control chars).
+    #[error(transparent)]
+    Validation(#[from] protocol::UrlValidationError),
 
     /// Too many URL open requests in a short period.
     #[error("rate limited: exceeded {RATE_LIMIT_PER_SEC} opens per second")]
@@ -48,31 +34,14 @@ pub enum BrowserError {
 
 /// Validate that a URL is safe to open in the host browser.
 ///
-/// Checks that the URL uses `http://` or `https://` and does not exceed
-/// `MAX_URL_LENGTH` characters.
+/// Delegates to [`protocol::validate_open_url`] for consistent validation
+/// across host and container sides.
 ///
 /// # Errors
 ///
-/// Returns [`BrowserError::InvalidScheme`] or [`BrowserError::UrlTooLong`].
+/// Returns [`BrowserError::Validation`] if the URL is invalid.
 pub fn validate_url(url: &str) -> Result<(), BrowserError> {
-    if url.len() > MAX_URL_LENGTH {
-        return Err(BrowserError::UrlTooLong {
-            len: url.len(),
-            max: MAX_URL_LENGTH,
-        });
-    }
-
-    // Reject control characters (newlines, null bytes, etc.) to prevent
-    // log injection and argument confusion in open/xdg-open.
-    if url.chars().any(|c| c.is_ascii_control()) {
-        return Err(BrowserError::InvalidCharacters);
-    }
-
-    let lower = url.to_ascii_lowercase();
-    if !lower.starts_with("http://") && !lower.starts_with("https://") {
-        return Err(BrowserError::InvalidScheme);
-    }
-
+    protocol::validate_open_url(url)?;
     Ok(())
 }
 
@@ -258,84 +227,24 @@ impl BrowserOpener {
 mod tests {
     use super::*;
 
-    // --- validate_url tests ---
+    // --- validate_url delegation tests ---
 
     #[test]
-    fn validate_http_url() {
+    fn validate_accepts_valid_urls() {
         assert!(validate_url("http://localhost:8080/path").is_ok());
-    }
-
-    #[test]
-    fn validate_https_url() {
         assert!(validate_url("https://example.com/auth/callback").is_ok());
     }
 
     #[test]
-    fn validate_http_case_insensitive() {
-        assert!(validate_url("HTTP://localhost:8080").is_ok());
-        assert!(validate_url("Https://example.com").is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_ftp() {
+    fn validate_rejects_invalid_urls() {
         assert!(matches!(
             validate_url("ftp://example.com/file"),
-            Err(BrowserError::InvalidScheme)
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_file() {
-        assert!(matches!(
-            validate_url("file:///etc/passwd"),
-            Err(BrowserError::InvalidScheme)
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_javascript() {
-        assert!(matches!(
-            validate_url("javascript:alert(1)"),
-            Err(BrowserError::InvalidScheme)
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_empty() {
-        assert!(matches!(validate_url(""), Err(BrowserError::InvalidScheme)));
-    }
-
-    #[test]
-    fn validate_rejects_control_characters() {
-        assert!(matches!(
-            validate_url("http://example.com/path\nHeader: injected"),
-            Err(BrowserError::InvalidCharacters)
+            Err(BrowserError::Validation(_))
         ));
         assert!(matches!(
-            validate_url("http://example.com/\0null"),
-            Err(BrowserError::InvalidCharacters)
+            validate_url(""),
+            Err(BrowserError::Validation(_))
         ));
-        assert!(matches!(
-            validate_url("http://example.com/\ttab"),
-            Err(BrowserError::InvalidCharacters)
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_too_long() {
-        let long_url = format!("http://example.com/{}", "a".repeat(MAX_URL_LENGTH));
-        assert!(matches!(
-            validate_url(&long_url),
-            Err(BrowserError::UrlTooLong { .. })
-        ));
-    }
-
-    #[test]
-    fn validate_accepts_max_length() {
-        // Exactly at the limit should be fine
-        let url = format!("http://x.co/{}", "a".repeat(MAX_URL_LENGTH - 12));
-        assert_eq!(url.len(), MAX_URL_LENGTH);
-        assert!(validate_url(&url).is_ok());
     }
 
     // --- rewrite_url tests ---

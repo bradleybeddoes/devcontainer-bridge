@@ -23,6 +23,67 @@ pub enum ProtocolError {
     },
 }
 
+/// Maximum allowed URL length in characters for [`Message::OpenUrl`].
+pub const MAX_URL_LENGTH: usize = 2048;
+
+/// Errors from URL validation for [`Message::OpenUrl`].
+#[derive(Debug, Error)]
+pub enum UrlValidationError {
+    /// The URL is empty.
+    #[error("URL is empty")]
+    Empty,
+
+    /// The URL scheme is not `http://` or `https://`.
+    #[error("invalid URL scheme: only http:// and https:// are allowed")]
+    InvalidScheme,
+
+    /// The URL exceeds [`MAX_URL_LENGTH`] characters.
+    #[error("URL too long: {len} chars exceeds {max} char limit")]
+    TooLong {
+        /// Actual length of the URL.
+        len: usize,
+        /// Maximum allowed length.
+        max: usize,
+    },
+
+    /// The URL contains ASCII control characters.
+    #[error("URL contains invalid characters (control characters are not allowed)")]
+    InvalidCharacters,
+}
+
+/// Validate that a URL is safe for the [`Message::OpenUrl`] protocol.
+///
+/// Checks that the URL is non-empty, uses `http://` or `https://`,
+/// does not exceed [`MAX_URL_LENGTH`], and contains no ASCII control
+/// characters.
+///
+/// # Errors
+///
+/// Returns [`UrlValidationError`] describing the first violated constraint.
+pub fn validate_open_url(url: &str) -> Result<(), UrlValidationError> {
+    if url.is_empty() {
+        return Err(UrlValidationError::Empty);
+    }
+
+    if url.len() > MAX_URL_LENGTH {
+        return Err(UrlValidationError::TooLong {
+            len: url.len(),
+            max: MAX_URL_LENGTH,
+        });
+    }
+
+    if url.chars().any(|c| c.is_ascii_control()) {
+        return Err(UrlValidationError::InvalidCharacters);
+    }
+
+    let lower = url.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Err(UrlValidationError::InvalidScheme);
+    }
+
+    Ok(())
+}
+
 /// Transport protocol for a forwarded port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Protocol {
@@ -400,5 +461,84 @@ mod tests {
             r#"{"type":"Forward","port":70000,"protocol":"Tcp","process_name":null,"pid":null}"#,
         );
         assert!(result.is_err(), "port > 65535 should be rejected");
+    }
+
+    // --- validate_open_url tests ---
+
+    #[test]
+    fn validate_http_url() {
+        assert!(validate_open_url("http://localhost:8080/path").is_ok());
+    }
+
+    #[test]
+    fn validate_https_url() {
+        assert!(validate_open_url("https://example.com/auth/callback").is_ok());
+    }
+
+    #[test]
+    fn validate_case_insensitive_scheme() {
+        assert!(validate_open_url("HTTP://localhost:8080").is_ok());
+        assert!(validate_open_url("Https://example.com").is_ok());
+        assert!(validate_open_url("hTtP://example.com/path").is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty() {
+        assert!(matches!(
+            validate_open_url(""),
+            Err(UrlValidationError::Empty)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_ftp() {
+        assert!(matches!(
+            validate_open_url("ftp://example.com/file"),
+            Err(UrlValidationError::InvalidScheme)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_file() {
+        assert!(matches!(
+            validate_open_url("file:///etc/passwd"),
+            Err(UrlValidationError::InvalidScheme)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_javascript() {
+        assert!(matches!(
+            validate_open_url("javascript:alert(1)"),
+            Err(UrlValidationError::InvalidScheme)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_control_characters() {
+        assert!(matches!(
+            validate_open_url("http://example.com/path\nHeader: injected"),
+            Err(UrlValidationError::InvalidCharacters)
+        ));
+        assert!(matches!(
+            validate_open_url("http://example.com/\0null"),
+            Err(UrlValidationError::InvalidCharacters)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_too_long() {
+        let long_url = format!("http://example.com/{}", "a".repeat(MAX_URL_LENGTH));
+        assert!(matches!(
+            validate_open_url(&long_url),
+            Err(UrlValidationError::TooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_max_length() {
+        let url = format!("http://x.co/{}", "a".repeat(MAX_URL_LENGTH - 12));
+        assert_eq!(url.len(), MAX_URL_LENGTH);
+        assert!(validate_open_url(&url).is_ok());
     }
 }
