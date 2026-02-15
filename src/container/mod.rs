@@ -325,7 +325,7 @@ pub async fn run(
     let control_addr = parse_addr(config.control_port)?;
     let data_addr = parse_addr(config.data_port)?;
 
-    let scan_interval = Duration::from_millis(config.scan_interval_ms);
+    let scan_interval = Duration::from_millis(config.scan_interval_ms.max(100));
     let proc_path = Path::new("/proc");
 
     // Build the set of ports to exclude from scanning (self-exclusion of control/data ports)
