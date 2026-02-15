@@ -364,6 +364,14 @@ async fn run_forward(host: std::net::IpAddr, port: u16, control_port: u16) -> Re
                     Ok(Message::Ping) => {
                         let _ = conn.send(&Message::Pong).await;
                     }
+                    Ok(Message::ConnectRequest { conn_id, .. }) => {
+                        // Manual forwards don't support proxying; reject
+                        // immediately so the client gets a fast failure.
+                        let _ = conn.send(&Message::ConnectFailed {
+                            conn_id,
+                            error: "manual forward does not support proxying".into(),
+                        }).await;
+                    }
                     Err(_) => {
                         return Err(CliError::Connection(
                             "lost connection to host daemon".into(),
