@@ -151,7 +151,7 @@ impl Config {
                     .map_err(|e| ConfigError::ConfigFile(format!("{}: {e}", path.display())))?;
                 let file_cfg: FileConfig = toml::from_str(&contents)
                     .map_err(|e| ConfigError::ConfigFile(format!("{}: {e}", path.display())))?;
-                apply_file_config(&mut config, &file_cfg);
+                apply_file_config(&mut config, &file_cfg)?;
             }
         }
 
@@ -192,11 +192,21 @@ impl Config {
 }
 
 /// Apply values from a parsed config file onto a [`Config`].
-fn apply_file_config(config: &mut Config, file: &FileConfig) {
+fn apply_file_config(config: &mut Config, file: &FileConfig) -> Result<(), ConfigError> {
     if let Some(v) = file.control_port {
+        if v == 0 {
+            return Err(ConfigError::InvalidPort {
+                value: "0".to_owned(),
+            });
+        }
         config.control_port = v;
     }
     if let Some(v) = file.data_port {
+        if v == 0 {
+            return Err(ConfigError::InvalidPort {
+                value: "0".to_owned(),
+            });
+        }
         config.data_port = v;
     }
     if let Some(v) = file.scan_interval_ms {
@@ -222,6 +232,7 @@ fn apply_file_config(config: &mut Config, file: &FileConfig) {
     if let Some(ref v) = file.include_ports {
         config.include_ports.clone_from(v);
     }
+    Ok(())
 }
 
 /// Return the path to the config file: `~/.config/dbr/config.toml`.
