@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
-use std::time::Instant;
+
+use tokio::time::Instant;
 
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -225,6 +226,8 @@ impl BrowserOpener {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     // --- validate_url delegation tests ---
@@ -351,36 +354,30 @@ mod tests {
 
     // --- rate limiting tests ---
 
-    #[test]
-    fn rate_limiter_allows_up_to_limit() {
-        let mut opener = BrowserOpener::new();
-        // We can't actually open a browser in tests, so we test the rate
-        // limiting logic by calling validate + rate check directly.
-        // Push RATE_LIMIT_PER_SEC timestamps
-        let now = Instant::now();
+    #[tokio::test(start_paused = true)]
+    async fn rate_limiter_blocks_at_limit() {
+        let mut opener = BrowserOpener::with_cmd(Some("true".to_string()));
+        // Fill the sliding window to the limit
         for _ in 0..RATE_LIMIT_PER_SEC {
-            opener.recent_opens.push_back(now);
+            opener.recent_opens.push_back(Instant::now());
         }
-        // Next one should fail rate limit
-        assert_eq!(opener.recent_opens.len(), RATE_LIMIT_PER_SEC);
-
-        // Simulate the rate check — none should be pruned (all within 1s)
-        while opener
-            .recent_opens
-            .front()
-            .is_some_and(|t| now.duration_since(*t).as_secs() >= 1)
-        {
-            opener.recent_opens.pop_front();
-        }
-        assert!(opener.recent_opens.len() >= RATE_LIMIT_PER_SEC);
+        // Next open should be rate limited
+        let result = opener.open("http://localhost:8080");
+        assert!(matches!(result, Err(BrowserError::RateLimited)));
     }
 
-    #[test]
-    fn rate_limiter_expires_old_entries() {
-        let opener = BrowserOpener::new();
-        // We can't easily fake Instant, but we can verify the pruning logic
-        // by checking that an empty recent_opens allows opens
-        assert!(opener.recent_opens.is_empty());
+    #[tokio::test(start_paused = true)]
+    async fn rate_limiter_allows_after_window_expires() {
+        let mut opener = BrowserOpener::with_cmd(Some("true".to_string()));
+        // Fill the sliding window to the limit
+        for _ in 0..RATE_LIMIT_PER_SEC {
+            opener.recent_opens.push_back(Instant::now());
+        }
+        // Advance past the 1-second window
+        tokio::time::advance(Duration::from_secs(2)).await;
+        // Old entries should be pruned, allowing new opens
+        let result = opener.open("http://localhost:8080");
+        assert!(result.is_ok());
     }
 
     // --- port map management tests ---
