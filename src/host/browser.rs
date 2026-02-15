@@ -4,7 +4,7 @@
 //! when the container port is forwarded to a different host port, and opens
 //! the URL in the host's default browser.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::time::Instant;
 
@@ -170,7 +170,7 @@ pub struct BrowserOpener {
     /// Maps container port → host port for URL rewriting.
     port_map: HashMap<u16, u16>,
     /// Timestamps of recent opens for rate limiting (sliding window).
-    recent_opens: Vec<Instant>,
+    recent_opens: VecDeque<Instant>,
     /// Custom browser command (overrides platform default).
     browser_cmd: Option<String>,
 }
@@ -186,7 +186,7 @@ impl BrowserOpener {
     pub fn new() -> Self {
         Self {
             port_map: HashMap::new(),
-            recent_opens: Vec::new(),
+            recent_opens: VecDeque::new(),
             browser_cmd: None,
         }
     }
@@ -198,7 +198,7 @@ impl BrowserOpener {
     pub fn with_cmd(cmd: Option<String>) -> Self {
         Self {
             port_map: HashMap::new(),
-            recent_opens: Vec::new(),
+            recent_opens: VecDeque::new(),
             browser_cmd: cmd,
         }
     }
@@ -222,15 +222,22 @@ impl BrowserOpener {
     pub fn open(&mut self, url: &str) -> Result<(), BrowserError> {
         validate_url(url)?;
 
-        // Rate limiting: sliding window of 1 second
+        // Rate limiting: sliding window of 1 second.
+        // Entries are ordered chronologically, so we only need to pop
+        // expired entries from the front — O(expired) instead of O(n).
         let now = Instant::now();
-        self.recent_opens
-            .retain(|t| now.duration_since(*t).as_secs() < 1);
+        while self
+            .recent_opens
+            .front()
+            .is_some_and(|t| now.duration_since(*t).as_secs() >= 1)
+        {
+            self.recent_opens.pop_front();
+        }
         if self.recent_opens.len() >= RATE_LIMIT_PER_SEC {
             warn!(url, "browser open rate limited");
             return Err(BrowserError::RateLimited);
         }
-        self.recent_opens.push(now);
+        self.recent_opens.push_back(now);
 
         let rewritten = rewrite_url(url, &self.port_map);
         if rewritten != url {
@@ -433,15 +440,19 @@ mod tests {
         // Push RATE_LIMIT_PER_SEC timestamps
         let now = Instant::now();
         for _ in 0..RATE_LIMIT_PER_SEC {
-            opener.recent_opens.push(now);
+            opener.recent_opens.push_back(now);
         }
         // Next one should fail rate limit
         assert_eq!(opener.recent_opens.len(), RATE_LIMIT_PER_SEC);
 
-        // Simulate the rate check
-        opener
+        // Simulate the rate check — none should be pruned (all within 1s)
+        while opener
             .recent_opens
-            .retain(|t| now.duration_since(*t).as_secs() < 1);
+            .front()
+            .is_some_and(|t| now.duration_since(*t).as_secs() >= 1)
+        {
+            opener.recent_opens.pop_front();
+        }
         assert!(opener.recent_opens.len() >= RATE_LIMIT_PER_SEC);
     }
 
