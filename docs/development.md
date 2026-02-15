@@ -458,3 +458,106 @@ forwarded port on the host, the host daemon asks the container daemon to open
 a **new** reverse connection back to the host data port. This is important to
 understand when debugging connection issues -- the container must be able to
 reach `host.docker.internal:19286`.
+
+---
+
+## Releasing
+
+Releases involve two independent artifacts: the **dbr binary** (GitHub Releases)
+and the **devcontainer feature** (GHCR OCI artifact). The feature's install
+script downloads binaries from GitHub Releases, so a binary release must exist
+before the feature is useful.
+
+### Release pipeline overview
+
+```
+1. Push a v* tag          ──→  Release workflow builds binaries + creates GitHub Release
+2. Trigger Publish Feature ──→  Publishes devcontainer feature OCI artifact to GHCR
+```
+
+### Step 1: Create a binary release
+
+Tag the commit and push. The `release.yml` workflow triggers automatically on
+`v*` tags:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow builds four binaries:
+
+| Target | OS | Arch | Use |
+|--------|----|------|-----|
+| `x86_64-unknown-linux-musl` | Linux | x86_64 | Containers on Intel/AMD |
+| `aarch64-unknown-linux-musl` | Linux | arm64 | Containers on Apple Silicon |
+| `x86_64-apple-darwin` | macOS | x86_64 | Intel Mac host |
+| `aarch64-apple-darwin` | macOS | arm64 | Apple Silicon host |
+
+Each binary has a corresponding `.sha256` checksum file. The workflow creates a
+GitHub Release with auto-generated release notes and attaches all artifacts.
+
+### Step 2: Publish the devcontainer feature
+
+After the GitHub Release exists, publish the devcontainer feature to GHCR:
+
+1. Go to **Actions** → **Publish Feature** → **Run workflow**
+2. The `devcontainers/action@v1` packages `src/dbr/` as an OCI artifact
+3. The feature is published to `ghcr.io/bradleybeddoes/devcontainer-bridge/dbr`
+
+The feature's `install.sh` downloads the correct binary for the container's
+architecture from the GitHub Release at install time.
+
+### How the feature version works
+
+The feature has its own version in `src/dbr/devcontainer-feature.json` (e.g.,
+`1.0.0`), which is independent of the binary version (e.g., `v0.1.0`). The
+feature version controls the OCI artifact tag:
+
+```jsonc
+// Uses feature version 1.x, installs the latest binary release
+"ghcr.io/bradleybeddoes/devcontainer-bridge/dbr:1": {}
+
+// Pins a specific binary version
+"ghcr.io/bradleybeddoes/devcontainer-bridge/dbr:1": {
+  "version": "v0.1.0"
+}
+```
+
+Bump the feature version in `devcontainer-feature.json` when the feature itself
+changes (e.g., new options, install script updates). You do **not** need to bump
+it for every binary release -- the feature defaults to downloading the latest
+binary.
+
+### When to re-publish the feature
+
+- **New binary release only** (no feature changes) -- no need to re-publish.
+  The feature's `install.sh` resolves `latest` via the GitHub API at container
+  build time.
+- **Feature definition changes** (new options, install script fixes) -- bump the
+  version in `devcontainer-feature.json` and re-run the Publish Feature workflow.
+
+### Verifying a release
+
+After both workflows complete:
+
+```bash
+# Verify the GitHub Release has the expected artifacts
+gh release view v0.1.0
+
+# Verify the feature is available on GHCR
+docker run --rm ghcr.io/bradleybeddoes/devcontainer-bridge/dbr:1 cat /devcontainer-feature.json
+
+# Test in a real devcontainer by adding the feature to devcontainer.json
+# and rebuilding the container
+```
+
+### GitHub repository settings
+
+The Publish Feature workflow requires the repository to have **packages: write**
+permission for `GITHUB_TOKEN`. For private repositories, ensure:
+
+1. **Settings** → **Actions** → **General** → **Workflow permissions** is set to
+   **Read and write permissions**
+2. The GHCR package visibility matches your needs (private by default for
+   private repos)
