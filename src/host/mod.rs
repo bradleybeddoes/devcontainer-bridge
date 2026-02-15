@@ -55,6 +55,12 @@ const MAX_IDENTIFIER_LENGTH: usize = 256;
 /// Maximum length of a conn_id string.
 const MAX_CONN_ID_LENGTH: usize = 128;
 
+/// Timeout for the data port ConnectReady handshake read.
+const DATA_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for the first message on a new control connection.
+const FIRST_MSG_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Monotonically increasing registration epoch counter.
 ///
 /// Each new container registration gets a unique ID so that a stale
@@ -624,8 +630,16 @@ async fn handle_control_connection(
     shutdown_signal: mpsc::Sender<()>,
     exit_on_idle: bool,
 ) -> Result<(), ControlError> {
-    // First message should be Register or ListRequest
-    let first_msg = conn.recv().await?;
+    // First message should be Register or ListRequest.
+    // Timeout prevents a slow-loris peer from holding a task indefinitely.
+    let first_msg = tokio::time::timeout(FIRST_MSG_TIMEOUT, conn.recv())
+        .await
+        .map_err(|_| {
+            ControlError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "first message timeout",
+            ))
+        })??;
 
     match first_msg {
         Message::Register {
@@ -1193,7 +1207,15 @@ async fn handle_data_connection(
 
     // SECURITY: Use bounded read_message instead of unbounded read_line to
     // prevent OOM from a malicious peer sending data without a newline.
-    let msg = control::read_message(&mut reader).await?;
+    // Timeout prevents a slow-loris peer from holding a task indefinitely.
+    let msg = tokio::time::timeout(DATA_HANDSHAKE_TIMEOUT, control::read_message(&mut reader))
+        .await
+        .map_err(|_| {
+            ControlError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "data handshake timeout",
+            ))
+        })??;
 
     match msg {
         Message::ConnectReady { conn_id } => {
