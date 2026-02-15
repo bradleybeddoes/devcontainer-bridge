@@ -139,25 +139,32 @@ impl ConnectionTracker {
 
     /// Record a new proxy connection starting.
     fn increment(&self) {
-        self.count.fetch_add(1, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Record a proxy connection finishing; notifies drain waiters on zero.
     fn decrement(&self) {
-        if self.count.fetch_sub(1, Ordering::Relaxed) == 1 {
+        if self.count.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.drained.notify_one();
         }
     }
 
     /// Return the current number of active connections.
     fn active(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        self.count.load(Ordering::Acquire)
     }
 
     /// Wait until all active connections have finished.
+    ///
+    /// Registers the `Notify` future *before* checking the count to avoid
+    /// missing a `notify_one` that fires between the check and the await.
     async fn wait_drained(&self) {
-        while self.active() > 0 {
-            self.drained.notified().await;
+        loop {
+            let notified = self.drained.notified();
+            if self.active() == 0 {
+                return;
+            }
+            notified.await;
         }
     }
 }
