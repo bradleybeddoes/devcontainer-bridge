@@ -585,6 +585,11 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
     let mut state = ctx.state.lock().await;
     drain_all_forwards(&mut state, drain_timeout).await;
 
+    // Clean up the PID file written by `dbr ensure`
+    if let Err(e) = ensure::remove_pid_file() {
+        debug!(error = %e, "could not remove PID file (non-fatal)");
+    }
+
     info!("host daemon stopped");
     Ok(())
 }

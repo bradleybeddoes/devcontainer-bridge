@@ -150,6 +150,21 @@ pub async fn run_ensure(
     }
 }
 
+/// Remove the daemon PID file (`~/.config/dbr/daemon.pid`).
+///
+/// Silently succeeds if the file does not exist.
+pub fn remove_pid_file() -> Result<(), std::io::Error> {
+    let path = pid_file_path()?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            debug!(path = %path.display(), "removed PID file");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Write the daemon PID to `~/.config/dbr/daemon.pid`.
 fn write_pid_file(pid: u32) -> Result<(), std::io::Error> {
     let path = pid_file_path()?;
