@@ -66,7 +66,7 @@ All TCP connections flow **container → host** (reverse connection model). This
 ### 1. Install the host binary (macOS/Linux)
 
 ```bash
-curl -fsSL https://github.com/yourorg/devcontainer-bridge/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/bradleybeddoes/devcontainer-bridge/releases/latest/download/install.sh | bash
 ```
 
 Or build from source:
@@ -82,7 +82,7 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 ```jsonc
 {
   "features": {
-    "ghcr.io/yourorg/dbr-feature:latest": {}
+    "ghcr.io/bradleybeddoes/dbr-feature:latest": {}
   }
 }
 ```

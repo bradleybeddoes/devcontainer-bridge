@@ -23,7 +23,7 @@ Download the binary for your platform from GitHub Releases, or use the install
 script:
 
 ```bash
-curl -fsSL https://github.com/yourorg/devcontainer-bridge/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/bradleybeddoes/devcontainer-bridge/releases/latest/download/install.sh | bash
 ```
 
 This places `dbr` at `~/.local/bin/dbr` (or `/usr/local/bin/dbr`). Verify:
@@ -39,7 +39,7 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 ```jsonc
 {
   "features": {
-    "ghcr.io/yourorg/dbr-feature:latest": {}
+    "ghcr.io/bradleybeddoes/dbr-feature:latest": {}
   }
 }
 ```

@@ -13,7 +13,7 @@ Add the `dbr` feature to your shared `devcontainer.json`:
 ```jsonc
 {
   "features": {
-    "ghcr.io/yourorg/dbr-feature:latest": {}
+    "ghcr.io/bradleybeddoes/dbr-feature:latest": {}
   }
 }
 ```
