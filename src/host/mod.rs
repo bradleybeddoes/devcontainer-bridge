@@ -266,6 +266,22 @@ impl HostState {
     }
 }
 
+/// Shared resources threaded through control connection handlers.
+///
+/// Groups the `Arc`-wrapped state, pending-connections map, browser
+/// opener, and client-connection channel so they can be passed as a
+/// single reference instead of 4+ separate parameters.
+struct DaemonContext {
+    /// Protected host daemon state (containers, port allocations).
+    state: Arc<Mutex<HostState>>,
+    /// Pending reverse data connections awaiting `ConnectReady`.
+    pending: PendingConnections,
+    /// Browser opener with port rewriting and rate limiting.
+    browser: Arc<Mutex<BrowserOpener>>,
+    /// Channel that port listeners use to deliver client connections.
+    client_tx: mpsc::Sender<ClientConnection>,
+}
+
 /// Configuration for the host daemon.
 pub struct HostConfig {
     /// Control channel port (default: 19285).
@@ -418,13 +434,16 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
         "data listener bound"
     );
 
-    let state = Arc::new(Mutex::new(HostState::new()));
-    let pending = new_pending_connections();
-    let browser = Arc::new(Mutex::new(BrowserOpener::with_cmd(config.browser_cmd.clone())));
-    let drain_timeout = config.drain_timeout;
-
     // Channel for client connections from all port listeners
     let (client_tx, mut client_rx) = mpsc::channel::<ClientConnection>(256);
+
+    let ctx = Arc::new(DaemonContext {
+        state: Arc::new(Mutex::new(HostState::new())),
+        pending: new_pending_connections(),
+        browser: Arc::new(Mutex::new(BrowserOpener::with_cmd(config.browser_cmd.clone()))),
+        client_tx,
+    });
+    let drain_timeout = config.drain_timeout;
 
     // Channel to signal daemon shutdown
     let (daemon_shutdown_tx, mut daemon_shutdown_rx) = mpsc::channel::<()>(1);
@@ -453,15 +472,12 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
                 match result {
                     Ok((conn, addr)) => {
                         info!(%addr, "accepted control connection");
-                        let state = Arc::clone(&state);
-                        let pending = Arc::clone(&pending);
-                        let browser = Arc::clone(&browser);
-                        let client_tx = client_tx.clone();
+                        let ctx = Arc::clone(&ctx);
                         let shutdown_signal = daemon_shutdown_tx.clone();
                         let exit_on_idle = config.exit_on_idle;
                         tokio::spawn(async move {
                             if let Err(e) = handle_control_connection(
-                                conn, addr, state, pending, browser, client_tx, shutdown_signal, exit_on_idle,
+                                conn, addr, &ctx, shutdown_signal, exit_on_idle,
                             ).await {
                                 warn!(%addr, error = %e, "control connection error");
                             }
@@ -478,7 +494,7 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
                 match result {
                     Ok((stream, addr)) => {
                         debug!(%addr, "accepted data connection");
-                        let pending = Arc::clone(&pending);
+                        let pending = Arc::clone(&ctx.pending);
                         tokio::spawn(async move {
                             if let Err(e) = handle_data_connection(stream, addr, pending).await {
                                 warn!(%addr, error = %e, "data connection error");
@@ -493,10 +509,9 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
 
             // Handle client connections from port listeners
             Some(client_conn) = client_rx.recv() => {
-                let state = Arc::clone(&state);
-                let pending = Arc::clone(&pending);
+                let ctx = Arc::clone(&ctx);
                 tokio::spawn(async move {
-                    handle_client_connection(client_conn, state, pending).await;
+                    handle_client_connection(client_conn, &ctx).await;
                 });
             }
 
@@ -521,7 +536,7 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
     }
 
     // Tear down all active forwards with graceful drain
-    let mut state = state.lock().await;
+    let mut state = ctx.state.lock().await;
     drain_all_forwards(&mut state, drain_timeout).await;
 
     info!("host daemon stopped");
@@ -529,14 +544,10 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
 }
 
 /// Handle a single control connection (from a container or CLI).
-#[allow(clippy::too_many_arguments)]
 async fn handle_control_connection(
     mut conn: ControlConnection,
     addr: SocketAddr,
-    state: Arc<Mutex<HostState>>,
-    pending: PendingConnections,
-    browser: Arc<Mutex<BrowserOpener>>,
-    client_tx: mpsc::Sender<ClientConnection>,
+    ctx: &DaemonContext,
     shutdown_signal: mpsc::Sender<()>,
     exit_on_idle: bool,
 ) -> Result<(), ControlError> {
@@ -564,7 +575,7 @@ async fn handle_control_connection(
 
             // Enforce container limit
             {
-                let s = state.lock().await;
+                let s = ctx.state.lock().await;
                 if s.containers.len() >= MAX_CONTAINERS && !s.containers.contains_key(&container_id)
                 {
                     warn!(
@@ -590,7 +601,7 @@ async fn handle_control_connection(
 
             // Register in state
             {
-                let mut s = state.lock().await;
+                let mut s = ctx.state.lock().await;
                 s.containers.insert(
                     container_id.clone(),
                     ContainerState {
@@ -605,21 +616,18 @@ async fn handle_control_connection(
             let result = handle_container_messages(
                 &mut conn,
                 &container_id,
-                &state,
-                &pending,
-                &browser,
-                &client_tx,
+                ctx,
                 connect_req_rx,
             )
             .await;
 
             // Clean up on disconnect
-            cleanup_container(&container_id, &state).await;
+            cleanup_container(&container_id, &ctx.state).await;
             info!(container_id, "container disconnected");
 
             // Check if we should exit
             if exit_on_idle {
-                let s = state.lock().await;
+                let s = ctx.state.lock().await;
                 if s.containers.is_empty() {
                     info!("last container disconnected, shutting down");
                     let _ = shutdown_signal.send(()).await;
@@ -632,7 +640,7 @@ async fn handle_control_connection(
             }
         }
         Message::ListRequest => {
-            let infos = state.lock().await.collect_forward_info();
+            let infos = ctx.state.lock().await.collect_forward_info();
             conn.send(&Message::ListResponse { forwards: infos })
                 .await?;
             Ok(())
@@ -643,7 +651,8 @@ async fn handle_control_connection(
         }
         Message::OpenUrl { url } => {
             // One-shot OpenUrl from `dbr open` (no registration needed)
-            let success = browser
+            let success = ctx
+                .browser
                 .lock()
                 .await
                 .open(&url)
@@ -670,10 +679,7 @@ async fn handle_control_connection(
 async fn handle_container_messages(
     conn: &mut ControlConnection,
     container_id: &str,
-    state: &Arc<Mutex<HostState>>,
-    pending: &PendingConnections,
-    browser: &Arc<Mutex<BrowserOpener>>,
-    client_tx: &mpsc::Sender<ClientConnection>,
+    ctx: &DaemonContext,
     mut connect_req_rx: mpsc::Receiver<OutboundConnectRequest>,
 ) -> Result<(), ControlError> {
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -685,7 +691,7 @@ async fn handle_container_messages(
             result = conn.recv() => {
                 let msg = result?;
                 let was_pong = dispatch_container_message(
-                    msg, conn, container_id, state, pending, browser, client_tx,
+                    msg, conn, container_id, ctx,
                 ).await?;
                 if was_pong {
                     missed_pongs = 0;
@@ -700,7 +706,7 @@ async fn handle_container_messages(
                     conn_id: req.conn_id.clone(),
                 }).await {
                     warn!(container_id, conn_id = req.conn_id, error = %e, "failed to send ConnectRequest");
-                    proxy::cancel_pending(pending, &req.conn_id).await;
+                    proxy::cancel_pending(&ctx.pending, &req.conn_id).await;
                 }
             }
 
@@ -728,15 +734,11 @@ async fn handle_container_messages(
 ///
 /// Returns `Ok(true)` if the message was a `Pong` (caller resets heartbeat),
 /// `Ok(false)` for all other handled messages.
-#[allow(clippy::too_many_arguments)]
 async fn dispatch_container_message(
     msg: Message,
     conn: &mut ControlConnection,
     container_id: &str,
-    state: &Arc<Mutex<HostState>>,
-    pending: &PendingConnections,
-    browser: &Arc<Mutex<BrowserOpener>>,
-    client_tx: &mpsc::Sender<ClientConnection>,
+    ctx: &DaemonContext,
 ) -> Result<bool, ControlError> {
     match msg {
         Message::Forward {
@@ -746,7 +748,7 @@ async fn dispatch_container_message(
             pid,
         } => {
             let result =
-                handle_forward(container_id, port, process_name, pid, state, client_tx).await;
+                handle_forward(container_id, port, process_name, pid, &ctx.state, &ctx.client_tx).await;
             match result {
                 Ok(host_port) => {
                     if host_port != port {
@@ -759,7 +761,7 @@ async fn dispatch_container_message(
                     } else {
                         info!(container_id, container_port = port, host_port, "port forwarded");
                     }
-                    browser.lock().await.add_port_mapping(port, host_port);
+                    ctx.browser.lock().await.add_port_mapping(port, host_port);
                     conn.send(&Message::ForwardAck {
                         port,
                         success: true,
@@ -781,8 +783,8 @@ async fn dispatch_container_message(
         }
 
         Message::Unforward { port } => {
-            handle_unforward(container_id, port, state).await;
-            browser.lock().await.remove_port_mapping(port);
+            handle_unforward(container_id, port, &ctx.state).await;
+            ctx.browser.lock().await.remove_port_mapping(port);
             info!(container_id, port, "port unforwarded");
             Ok(false)
         }
@@ -792,13 +794,14 @@ async fn dispatch_container_message(
                 warn!(container_id, "ignoring ConnectFailed with oversized conn_id");
             } else {
                 warn!(container_id, conn_id, error, "container connect failed");
-                proxy::cancel_pending(pending, &conn_id).await;
+                proxy::cancel_pending(&ctx.pending, &conn_id).await;
             }
             Ok(false)
         }
 
         Message::OpenUrl { url } => {
-            let success = browser
+            let success = ctx
+                .browser
                 .lock()
                 .await
                 .open(&url)
@@ -1040,15 +1043,14 @@ async fn handle_data_connection(
 /// Tracks active connection count for graceful draining on teardown.
 async fn handle_client_connection(
     client_conn: ClientConnection,
-    state: Arc<Mutex<HostState>>,
-    pending: PendingConnections,
+    ctx: &DaemonContext,
 ) {
     let port = client_conn.container_port;
     let peer = client_conn.peer_addr;
 
     // Find which container owns this port, get connection tracking and connect request channel
     let (container_id, tracker, connect_tx) = {
-        let s = state.lock().await;
+        let s = ctx.state.lock().await;
         let cid = s.find_container_for_port(port).map(|s| s.to_string());
         let trk = cid.as_ref().and_then(|id| {
             s.containers
@@ -1090,7 +1092,7 @@ async fn handle_client_connection(
     // Register pending connection, then send ConnectRequest to the container
     // via its control channel. The container will open a reverse data connection
     // back to the host data port with a ConnectReady handshake.
-    let data_rx = register_pending(&pending, conn_id.clone()).await;
+    let data_rx = register_pending(&ctx.pending, conn_id.clone()).await;
 
     // Send ConnectRequest to the container's control message loop
     if let Err(e) = connect_tx
@@ -1101,7 +1103,7 @@ async fn handle_client_connection(
         .await
     {
         warn!(conn_id, port, error = %e, "failed to queue ConnectRequest");
-        proxy::cancel_pending(&pending, &conn_id).await;
+        proxy::cancel_pending(&ctx.pending, &conn_id).await;
         if let Some(trk) = tracker {
             trk.decrement();
         }
@@ -1109,7 +1111,7 @@ async fn handle_client_connection(
     }
 
     // Bridge when the data connection arrives (or timeout)
-    match bridge_connection(conn_id.clone(), client_conn.stream, data_rx, &pending).await {
+    match bridge_connection(conn_id.clone(), client_conn.stream, data_rx, &ctx.pending).await {
         Ok((c2s, s2c)) => {
             info!(
                 conn_id,
