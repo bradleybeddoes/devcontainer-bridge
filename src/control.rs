@@ -52,6 +52,14 @@ pub enum ControlError {
 ///
 /// Returns [`ControlError::ConnectionClosed`] on EOF.
 ///
+/// # UTF-8 safety
+///
+/// Intermediate chunks are validated as UTF-8 individually. This is safe
+/// because the JSON-lines protocol uses only ASCII-compatible characters
+/// (JSON keywords, digits, ASCII punctuation). A multibyte UTF-8 sequence
+/// split across chunk boundaries would cause an error, but this cannot
+/// occur in practice since JSON keys/values in our protocol are ASCII-only.
+///
 /// # Errors
 ///
 /// Returns [`ControlError`] on I/O failures, oversized messages, or
