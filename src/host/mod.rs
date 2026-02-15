@@ -13,7 +13,7 @@ pub mod proxy;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,6 +54,13 @@ const MAX_IDENTIFIER_LENGTH: usize = 256;
 
 /// Maximum length of a conn_id string.
 const MAX_CONN_ID_LENGTH: usize = 128;
+
+/// Monotonically increasing registration epoch counter.
+///
+/// Each new container registration gets a unique ID so that a stale
+/// disconnect handler (from a superseded connection) does not remove
+/// a newer registration's state.
+static NEXT_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Check whether an identifier (container_id or hostname) is safe.
 ///
@@ -222,6 +229,9 @@ struct OutboundConnectRequest {
 /// Holds the container's active forwards and the channel used to
 /// route `ConnectRequest` messages to its control connection handler.
 struct ContainerState {
+    /// Registration epoch — prevents a stale disconnect handler from
+    /// cleaning up a newer registration's state.
+    registration_id: u64,
     /// Human-readable hostname.
     hostname: String,
     /// Active forwards: container_port → ForwardState.
@@ -644,12 +654,14 @@ async fn handle_control_connection(
             // Create channel for outbound ConnectRequests to this container
             let (connect_req_tx, connect_req_rx) = mpsc::channel::<OutboundConnectRequest>(64);
 
-            // Register in state
+            // Register in state with a unique epoch ID
+            let reg_id = NEXT_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
             {
                 let mut s = ctx.state.lock().await;
                 s.containers.insert(
                     container_id.clone(),
                     ContainerState {
+                        registration_id: reg_id,
                         hostname,
                         forwards: HashMap::new(),
                         connect_request_tx: connect_req_tx,
@@ -661,9 +673,24 @@ async fn handle_control_connection(
             let result =
                 handle_container_messages(&mut conn, &container_id, ctx, connect_req_rx).await;
 
-            // Clean up on disconnect
-            cleanup_container(&container_id, &ctx.state).await;
-            info!(container_id, "container disconnected");
+            // Clean up on disconnect — only if this registration still owns the
+            // state. A re-registration replaces the ContainerState with a new
+            // registration_id, so a stale disconnect must not remove it.
+            let should_cleanup = {
+                let s = ctx.state.lock().await;
+                s.containers
+                    .get(&container_id)
+                    .map_or(false, |c| c.registration_id == reg_id)
+            };
+            if should_cleanup {
+                cleanup_container(&container_id, &ctx.state).await;
+                info!(container_id, "container disconnected");
+            } else {
+                info!(
+                    container_id,
+                    "stale connection closed (superseded by re-registration)"
+                );
+            }
 
             // Check if we should exit
             if exit_on_idle {
