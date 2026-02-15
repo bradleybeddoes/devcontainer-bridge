@@ -358,14 +358,22 @@ pub async fn run(
         };
 
         // Run the connected session, passing in previously forwarded ports
-        let result = run_session(&mut conn, &session_params, &mut shutdown, last_forwarded).await;
+        let (outcome, forwarded) =
+            run_session(&mut conn, &session_params, &mut shutdown, last_forwarded).await;
 
-        match result {
-            Ok((SessionExit::Shutdown, _)) => {
+        match outcome {
+            SessionOutcome::Shutdown => {
                 info!("shutdown signal received, exiting");
                 return Ok(());
             }
-            Ok((SessionExit::Disconnected, forwarded)) | Err((_, forwarded)) => {
+            SessionOutcome::Disconnected => {
+                last_forwarded = forwarded;
+                if backoff_or_shutdown(&mut backoff, BACKOFF_MAX, &mut shutdown).await {
+                    return Ok(());
+                }
+            }
+            SessionOutcome::Error(e) => {
+                warn!(error = %e, "session error, reconnecting");
                 last_forwarded = forwarded;
                 if backoff_or_shutdown(&mut backoff, BACKOFF_MAX, &mut shutdown).await {
                     return Ok(());
@@ -414,12 +422,17 @@ async fn re_forward_ports(
     false
 }
 
-/// Reason the session ended normally.
-enum SessionExit {
+/// How a connected session ended.
+///
+/// Replaces `Result<(Exit, Map), (Error, Map)>` with a flat enum,
+/// since the forwarded-ports map is always returned regardless.
+enum SessionOutcome {
     /// A shutdown signal was received.
     Shutdown,
     /// The control connection was lost.
     Disconnected,
+    /// An error occurred on the control channel.
+    Error(ContainerError),
 }
 
 /// Parameters for a connected session, grouping values that don't change
@@ -442,8 +455,7 @@ async fn run_session(
     params: &SessionParams<'_>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
     initial_forwarded: HashMap<u16, ListeningPort>,
-) -> Result<(SessionExit, HashMap<u16, ListeningPort>), (ContainerError, HashMap<u16, ListeningPort>)>
-{
+) -> (SessionOutcome, HashMap<u16, ListeningPort>) {
     // Track currently forwarded ports (initialized from previous session on reconnect)
     let mut forwarded = initial_forwarded;
     let mut scan_ticker = tokio::time::interval(params.scan_interval);
@@ -479,7 +491,7 @@ async fn run_session(
                         };
                         if let Err(e) = conn.send(&msg).await {
                             warn!(port, error = %e, "failed to send Forward");
-                            return Err((ContainerError::Control(e), forwarded));
+                            return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
                         }
                         forwarded.insert(*port, (*lp).clone());
                     }
@@ -497,7 +509,7 @@ async fn run_session(
                     let msg = Message::Unforward { port };
                     if let Err(e) = conn.send(&msg).await {
                         warn!(port, error = %e, "failed to send Unforward");
-                        return Err((ContainerError::Control(e), forwarded));
+                        return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
                     }
                     forwarded.remove(&port);
                 }
@@ -513,7 +525,7 @@ async fn run_session(
                         debug!("received Ping, sending Pong");
                         if let Err(e) = conn.send(&Message::Pong).await {
                             warn!(error = %e, "failed to send Pong");
-                            return Err((ContainerError::Control(e), forwarded));
+                            return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
                         }
                     }
                     Ok(Message::ForwardAck { port, success, host_port }) => {
@@ -529,11 +541,11 @@ async fn run_session(
                     }
                     Err(ControlError::ConnectionClosed) => {
                         warn!("control connection closed by host");
-                        return Ok((SessionExit::Disconnected, forwarded));
+                        return (SessionOutcome::Disconnected, forwarded);
                     }
                     Err(e) => {
                         warn!(error = %e, "control channel error");
-                        return Err((ContainerError::Control(e), forwarded));
+                        return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
                     }
                 }
             }
@@ -546,7 +558,7 @@ async fn run_session(
                         debug!(port, error = %e, "failed to send Unforward during shutdown");
                     }
                 }
-                return Ok((SessionExit::Shutdown, forwarded));
+                return (SessionOutcome::Shutdown, forwarded);
             }
         }
     }
