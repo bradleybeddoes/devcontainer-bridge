@@ -25,6 +25,51 @@ use self::data::spawn_connect_handler;
 use self::filter::PortFilter;
 use self::scanner::{ListeningPort, ScanError};
 
+/// Exponential backoff with reset, encapsulating retry delay state.
+struct Backoff {
+    current: Duration,
+    initial: Duration,
+    max: Duration,
+}
+
+impl Backoff {
+    fn new(initial: Duration, max: Duration) -> Self {
+        Self {
+            current: initial,
+            initial,
+            max,
+        }
+    }
+
+    /// Double the current delay, capped at the maximum.
+    fn escalate(&mut self) {
+        self.current = (self.current * 2).min(self.max);
+    }
+
+    /// Reset the delay to the initial value after a successful connection.
+    fn reset(&mut self) {
+        self.current = self.initial;
+    }
+
+    /// Sleep for the current delay (escalating afterward), or return
+    /// immediately if a shutdown signal arrives. Returns `true` on shutdown.
+    async fn wait_or_shutdown(
+        &mut self,
+        shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> bool {
+        tokio::select! {
+            _ = tokio::time::sleep(self.current) => {
+                self.escalate();
+                false
+            }
+            _ = shutdown.changed() => {
+                info!("shutdown signal received during backoff");
+                true
+            }
+        }
+    }
+}
+
 /// Errors that can occur in the container daemon.
 #[derive(Debug, Error)]
 pub enum ContainerError {
@@ -272,10 +317,7 @@ pub async fn run(
         None,
     )?;
 
-    // Exponential backoff state: 100ms initial, 5s cap, doubles on failure
-    const BACKOFF_INITIAL: Duration = Duration::from_millis(100);
-    const BACKOFF_MAX: Duration = Duration::from_secs(5);
-    let mut backoff = BACKOFF_INITIAL;
+    let mut backoff = Backoff::new(Duration::from_millis(100), Duration::from_secs(5));
 
     // Track ports across reconnections so we can re-Forward them
     let mut last_forwarded: HashMap<u16, ListeningPort> = HashMap::new();
@@ -287,8 +329,8 @@ pub async fn run(
         let mut conn = match control::connect(control_addr).await {
             Ok(c) => c,
             Err(e) => {
-                warn!(error = %e, backoff_ms = backoff.as_millis(), "failed to connect to host, retrying");
-                if backoff_or_shutdown(&mut backoff, BACKOFF_MAX, &mut shutdown).await {
+                warn!(error = %e, backoff_ms = backoff.current.as_millis(), "failed to connect to host, retrying");
+                if backoff.wait_or_shutdown(&mut shutdown).await {
                     return Ok(());
                 }
                 continue;
@@ -307,7 +349,7 @@ pub async fn run(
             .await
         {
             warn!(error = %e, "failed to send Register, reconnecting");
-            backoff = (backoff * 2).min(BACKOFF_MAX);
+            backoff.escalate();
             continue;
         }
 
@@ -318,23 +360,23 @@ pub async fn run(
             }
             Ok(Message::RegisterAck { success: false }) => {
                 error!("registration rejected by host");
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                backoff.escalate();
                 continue;
             }
             Ok(other) => {
                 warn!(?other, "unexpected message, expected RegisterAck");
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                backoff.escalate();
                 continue;
             }
             Err(e) => {
                 warn!(error = %e, "failed to receive RegisterAck");
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                backoff.escalate();
                 continue;
             }
         }
 
         // Connected successfully — reset backoff
-        backoff = BACKOFF_INITIAL;
+        backoff.reset();
 
         // Re-Forward all previously tracked ports after reconnection
         if !last_forwarded.is_empty() {
@@ -344,7 +386,7 @@ pub async fn run(
             );
             let re_forward_failed = re_forward_ports(&mut conn, &last_forwarded).await;
             if re_forward_failed {
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                backoff.escalate();
                 continue;
             }
         }
@@ -368,36 +410,17 @@ pub async fn run(
             }
             SessionOutcome::Disconnected => {
                 last_forwarded = forwarded;
-                if backoff_or_shutdown(&mut backoff, BACKOFF_MAX, &mut shutdown).await {
+                if backoff.wait_or_shutdown(&mut shutdown).await {
                     return Ok(());
                 }
             }
             SessionOutcome::Error(e) => {
                 warn!(error = %e, "session error, reconnecting");
                 last_forwarded = forwarded;
-                if backoff_or_shutdown(&mut backoff, BACKOFF_MAX, &mut shutdown).await {
+                if backoff.wait_or_shutdown(&mut shutdown).await {
                     return Ok(());
                 }
             }
-        }
-    }
-}
-
-/// Sleep for `backoff` duration (doubling it afterward), or return early if
-/// a shutdown signal arrives. Returns `true` if shutdown was requested.
-async fn backoff_or_shutdown(
-    backoff: &mut Duration,
-    max: Duration,
-    shutdown: &mut tokio::sync::watch::Receiver<bool>,
-) -> bool {
-    tokio::select! {
-        _ = tokio::time::sleep(*backoff) => {
-            *backoff = (*backoff * 2).min(max);
-            false
-        }
-        _ = shutdown.changed() => {
-            info!("shutdown signal received during backoff");
-            true
         }
     }
 }
