@@ -5,6 +5,9 @@ Automatic port forwarding and browser URL opening between devcontainers and the 
 > [!NOTE]
 > This project is in early development. Bugs are expected. It has only been tested with a **macOS host** so far — Linux host support is planned but unverified.
 
+> [!TIP]
+> **Who you gonna call?** This project was built as an exploratory collaboration between a human developer and [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams.md) — multiple AI agents working in parallel to solve a real-world problem. The entire codebase, tests, documentation, and E2E validation scripts were pair-programmed across extended sessions, debugging live OAuth callbacks, chasing BufReader gremlins through TCP bridges, and diagnosing IPv6 hauntings at 2am. No proton packs were harmed. If there's something strange in your devcontainer neighbourhood... `dbr` is here to help.
+
 ## The Problem
 
 The [devcontainer CLI](https://github.com/devcontainers/cli) lacks two features that VS Code provides transparently:
