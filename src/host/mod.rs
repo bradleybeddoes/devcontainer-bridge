@@ -55,6 +55,21 @@ const MAX_IDENTIFIER_LENGTH: usize = 256;
 /// Maximum length of a conn_id string.
 const MAX_CONN_ID_LENGTH: usize = 128;
 
+/// Errors that can occur when handling a Forward request.
+#[derive(Debug, Error)]
+enum ForwardError {
+    /// Per-container forward limit exceeded.
+    #[error("container has reached the {max}-forward limit")]
+    TooManyForwards {
+        /// The maximum number of forwards allowed per container.
+        max: usize,
+    },
+
+    /// Failed to bind the per-port listener.
+    #[error(transparent)]
+    Listener(#[from] ListenerError),
+}
+
 /// Errors that can occur in the host daemon.
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -716,7 +731,7 @@ async fn handle_forward(
     pid: Option<u32>,
     state: &Arc<Mutex<HostState>>,
     client_tx: &mpsc::Sender<ClientConnection>,
-) -> Result<u16, ListenerError> {
+) -> Result<u16, ForwardError> {
     // Enforce per-container forward limit
     {
         let s = state.lock().await;
@@ -728,9 +743,8 @@ async fn handle_forward(
                     max = MAX_FORWARDS_PER_CONTAINER,
                     "rejecting forward: too many forwards for this container"
                 );
-                return Err(ListenerError::Bind {
-                    port,
-                    source: std::io::Error::other("too many forwards for this container"),
+                return Err(ForwardError::TooManyForwards {
+                    max: MAX_FORWARDS_PER_CONTAINER,
                 });
             }
         }
