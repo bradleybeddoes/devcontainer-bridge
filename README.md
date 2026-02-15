@@ -2,6 +2,9 @@
 
 Automatic port forwarding and browser URL opening between devcontainers and the host machine.
 
+> [!NOTE]
+> This project is in early development. Bugs are expected. It has only been tested with a **macOS host** so far — Linux host support is planned but unverified.
+
 ## The Problem
 
 The [devcontainer CLI](https://github.com/devcontainers/cli) lacks two features that VS Code provides transparently:
