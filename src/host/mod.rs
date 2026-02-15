@@ -98,12 +98,22 @@ struct ForwardState {
     active_connections: Arc<AtomicUsize>,
 }
 
+/// A request to send a ConnectRequest to a container via its control connection.
+struct OutboundConnectRequest {
+    /// The container port the client wants to reach.
+    port: u16,
+    /// Unique connection identifier.
+    conn_id: String,
+}
+
 /// State for a connected container.
 struct ContainerState {
     /// Human-readable hostname.
     hostname: String,
     /// Active forwards: container_port → ForwardState.
     forwards: HashMap<u16, ForwardState>,
+    /// Channel to send ConnectRequests to this container's control connection.
+    connect_request_tx: mpsc::Sender<OutboundConnectRequest>,
 }
 
 /// Shared state for the host daemon.
@@ -477,6 +487,9 @@ async fn handle_control_connection(
             // Acknowledge registration
             conn.send(&Message::RegisterAck { success: true }).await?;
 
+            // Create channel for outbound ConnectRequests to this container
+            let (connect_req_tx, connect_req_rx) = mpsc::channel::<OutboundConnectRequest>(64);
+
             // Register in state
             {
                 let mut s = state.lock().await;
@@ -485,6 +498,7 @@ async fn handle_control_connection(
                     ContainerState {
                         hostname,
                         forwards: HashMap::new(),
+                        connect_request_tx: connect_req_tx,
                     },
                 );
             }
@@ -497,6 +511,7 @@ async fn handle_control_connection(
                 &pending,
                 &browser,
                 &client_tx,
+                connect_req_rx,
             )
             .await;
 
@@ -528,6 +543,19 @@ async fn handle_control_connection(
             conn.send(&Message::Pong).await?;
             Ok(())
         }
+        Message::OpenUrl { url } => {
+            // One-shot OpenUrl from `dbr open` (no registration needed)
+            let success = browser
+                .lock()
+                .await
+                .open(&url)
+                .inspect_err(|e| {
+                    warn!(%addr, url, error = %e, "failed to open URL");
+                })
+                .is_ok();
+            conn.send(&Message::OpenUrlAck { success }).await?;
+            Ok(())
+        }
         other => {
             warn!(%addr, message = ?other, "unexpected first message, expected Register or ListRequest");
             Ok(())
@@ -539,6 +567,8 @@ async fn handle_control_connection(
 ///
 /// Sends periodic heartbeat pings and disconnects if the container
 /// fails to respond within [`MAX_MISSED_PONGS`] intervals.
+/// Also forwards ConnectRequests from client connection handlers to the
+/// container via its control connection.
 async fn handle_container_messages(
     conn: &mut ControlConnection,
     container_id: &str,
@@ -546,6 +576,7 @@ async fn handle_container_messages(
     pending: &PendingConnections,
     browser: &Arc<Mutex<BrowserOpener>>,
     client_tx: &mpsc::Sender<ClientConnection>,
+    mut connect_req_rx: mpsc::Receiver<OutboundConnectRequest>,
 ) -> Result<(), ControlError> {
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await; // consume the immediate first tick
@@ -642,6 +673,18 @@ async fn handle_container_messages(
                     other => {
                         debug!(container_id, message = ?other, "ignoring unexpected message");
                     }
+                }
+            }
+
+            // Forward ConnectRequests from client connection handlers
+            Some(req) = connect_req_rx.recv() => {
+                debug!(container_id, conn_id = req.conn_id, port = req.port, "sending ConnectRequest to container");
+                if let Err(e) = conn.send(&Message::ConnectRequest {
+                    port: req.port,
+                    conn_id: req.conn_id.clone(),
+                }).await {
+                    warn!(container_id, conn_id = req.conn_id, error = %e, "failed to send ConnectRequest");
+                    proxy::cancel_pending(pending, &req.conn_id).await;
                 }
             }
 
@@ -887,8 +930,8 @@ async fn handle_client_connection(
     let port = client_conn.container_port;
     let peer = client_conn.peer_addr;
 
-    // Find which container owns this port and get connection tracking
-    let (container_id, active_connections) = {
+    // Find which container owns this port, get connection tracking and connect request channel
+    let (container_id, active_connections, connect_tx) = {
         let s = state.lock().await;
         let cid = s.find_container_for_port(port).map(|s| s.to_string());
         let active = cid.as_ref().and_then(|id| {
@@ -897,13 +940,25 @@ async fn handle_client_connection(
                 .and_then(|c| c.forwards.get(&port))
                 .map(|f| Arc::clone(&f.active_connections))
         });
-        (cid, active)
+        let tx = cid
+            .as_ref()
+            .and_then(|id| s.containers.get(id))
+            .map(|c| c.connect_request_tx.clone());
+        (cid, active, tx)
     };
 
     let container_id = match container_id {
         Some(id) => id,
         None => {
             warn!(port, %peer, "no container owns this forwarded port");
+            return;
+        }
+    };
+
+    let connect_tx = match connect_tx {
+        Some(tx) => tx,
+        None => {
+            warn!(port, %peer, container_id, "no connect request channel for container");
             return;
         }
     };
@@ -916,24 +971,26 @@ async fn handle_client_connection(
     let conn_id = uuid::Uuid::new_v4().to_string();
     debug!(conn_id, container_id, port, %peer, "initiating proxy for client connection");
 
-    // Register pending connection BEFORE we'd send ConnectRequest
-    // (ConnectRequest sending requires the container's control connection,
-    //  which is handled by the container message loop — we'd need a channel.
-    //  For now, the mod.rs architecture means we need to send via the
-    //  container's ControlConnection which is in the handle_container_messages
-    //  loop. We'll store the request and have that loop pick it up.)
-    //
-    // NOTE: The actual ConnectRequest sending is coordinated via the pending
-    // map and an outbound channel. For the MVP, we use a simpler approach:
-    // we register the pending and the host daemon main loop is responsible
-    // for sending the ConnectRequest through the control connection.
-    //
-    // Since we don't have direct access to the control connection here,
-    // we store the conn_id in pending and log a warning. The full
-    // implementation requires a request channel per container — this is
-    // a known limitation addressed in the architecture.
-
+    // Register pending connection, then send ConnectRequest to the container
+    // via its control channel. The container will open a reverse data connection
+    // back to the host data port with a ConnectReady handshake.
     let data_rx = register_pending(&pending, conn_id.clone()).await;
+
+    // Send ConnectRequest to the container's control message loop
+    if let Err(e) = connect_tx
+        .send(OutboundConnectRequest {
+            port,
+            conn_id: conn_id.clone(),
+        })
+        .await
+    {
+        warn!(conn_id, port, error = %e, "failed to queue ConnectRequest");
+        proxy::cancel_pending(&pending, &conn_id).await;
+        if let Some(active) = active_connections {
+            active.fetch_sub(1, Ordering::Relaxed);
+        }
+        return;
+    }
 
     // Bridge when the data connection arrives (or timeout)
     match bridge_connection(conn_id.clone(), client_conn.stream, data_rx, &pending).await {

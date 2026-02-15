@@ -674,9 +674,17 @@ async fn test_multiple_forwards_same_container() {
 
     // Ensure both Unforward messages have been processed by sending a
     // Ping/Pong round-trip (messages are processed sequentially).
+    // Note: ConnectRequests from the can_connect_port() calls above may
+    // be queued on the control channel, so drain them before the Pong.
     conn.send(&Message::Ping).await.unwrap();
-    let pong = conn.recv().await.unwrap();
-    assert_eq!(pong, Message::Pong);
+    loop {
+        let msg = conn.recv().await.unwrap();
+        match msg {
+            Message::Pong => break,
+            Message::ConnectRequest { .. } => continue, // drain queued connect requests
+            other => panic!("expected Pong or ConnectRequest, got {other:?}"),
+        }
+    }
 
     // Give the OS a moment to release the ports after listener drop.
     tokio::time::sleep(Duration::from_millis(200)).await;
