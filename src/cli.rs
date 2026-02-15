@@ -117,12 +117,12 @@ pub enum Command {
         #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
         control_port: u16,
 
-        /// Host daemon IP address.
+        /// Host daemon address (IP or hostname).
         ///
-        /// Defaults to 127.0.0.1. Change this if the host daemon was started
-        /// with `--bind-addr` set to a non-loopback address.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: IpAddr,
+        /// When omitted, auto-resolves via DCBRIDGE_HOST env var,
+        /// then host.docker.internal DNS, then 127.0.0.1.
+        #[arg(long)]
+        host: Option<String>,
 
         /// Output as JSON.
         #[arg(long)]
@@ -139,12 +139,12 @@ pub enum Command {
         #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
         control_port: u16,
 
-        /// Host daemon IP address.
+        /// Host daemon address (IP or hostname).
         ///
-        /// Defaults to 127.0.0.1. Change this if the host daemon was started
-        /// with `--bind-addr` set to a non-loopback address.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: IpAddr,
+        /// When omitted, auto-resolves via DCBRIDGE_HOST env var,
+        /// then host.docker.internal DNS, then 127.0.0.1.
+        #[arg(long)]
+        host: Option<String>,
     },
 
     /// Manually remove a port forward.
@@ -157,12 +157,12 @@ pub enum Command {
         #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
         control_port: u16,
 
-        /// Host daemon IP address.
+        /// Host daemon address (IP or hostname).
         ///
-        /// Defaults to 127.0.0.1. Change this if the host daemon was started
-        /// with `--bind-addr` set to a non-loopback address.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: IpAddr,
+        /// When omitted, auto-resolves via DCBRIDGE_HOST env var,
+        /// then host.docker.internal DNS, then 127.0.0.1.
+        #[arg(long)]
+        host: Option<String>,
     },
 
     /// Open a URL in the host browser via the host daemon.
@@ -210,11 +210,11 @@ BROWSER INTEGRATION:
         #[arg(long, default_value_t = DEFAULT_DATA_PORT)]
         data_port: u16,
 
-        /// Host daemon IP address for health check.
+        /// Host daemon address (IP or hostname) for health check.
         ///
-        /// Defaults to 127.0.0.1. Change this if the host daemon was started
-        /// with `--bind-addr` set to a non-loopback address.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: IpAddr,
+        /// When omitted, auto-resolves via DCBRIDGE_HOST env var,
+        /// then host.docker.internal DNS, then 127.0.0.1.
+        #[arg(long)]
+        host: Option<String>,
     },
 }
