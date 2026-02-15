@@ -529,7 +529,10 @@ async fn run_session(
     // loop, which relays them as ConnectFailed on the control connection.
     let (fail_tx, mut fail_rx) = tokio::sync::mpsc::channel::<Message>(64);
 
-    loop {
+    // Track spawned connect handler tasks for graceful drain on exit.
+    let mut connect_handles: Vec<tokio::task::JoinHandle<Result<(), data::DataError>>> = Vec::new();
+
+    let outcome = 'session: loop {
         tokio::select! {
             _ = scan_ticker.tick() => {
                 // Scan for listening ports
@@ -549,6 +552,7 @@ async fn run_session(
                     .collect();
 
                 // Detect new ports
+                let mut send_err = None;
                 for (port, lp) in &current_map {
                     if !forwarded.contains_key(port) {
                         info!(port, process = ?lp.process_name, "new listening port detected");
@@ -560,10 +564,14 @@ async fn run_session(
                         };
                         if let Err(e) = conn.send(&msg).await {
                             warn!(port, error = %e, "failed to send Forward");
-                            return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
+                            send_err = Some(e);
+                            break;
                         }
                         forwarded.insert(*port, (*lp).clone());
                     }
+                }
+                if let Some(e) = send_err {
+                    break 'session SessionOutcome::Error(ContainerError::Control(e));
                 }
 
                 // Detect removed ports
@@ -578,9 +586,13 @@ async fn run_session(
                     let msg = Message::Unforward { port };
                     if let Err(e) = conn.send(&msg).await {
                         warn!(port, error = %e, "failed to send Unforward");
-                        return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
+                        send_err = Some(e);
+                        break;
                     }
                     forwarded.remove(&port);
+                }
+                if let Some(e) = send_err {
+                    break 'session SessionOutcome::Error(ContainerError::Control(e));
                 }
             }
 
@@ -588,13 +600,16 @@ async fn run_session(
                 match msg_result {
                     Ok(Message::ConnectRequest { port, conn_id }) => {
                         info!(port, %conn_id, "received ConnectRequest");
-                        spawn_connect_handler(port, conn_id, params.data_addr, fail_tx.clone());
+                        let handle = spawn_connect_handler(port, conn_id, params.data_addr, fail_tx.clone());
+                        connect_handles.push(handle);
+                        // Prune completed handles to avoid unbounded growth
+                        connect_handles.retain(|h| !h.is_finished());
                     }
                     Ok(Message::Ping) => {
                         debug!("received Ping, sending Pong");
                         if let Err(e) = conn.send(&Message::Pong).await {
                             warn!(error = %e, "failed to send Pong");
-                            return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
+                            break 'session SessionOutcome::Error(ContainerError::Control(e));
                         }
                     }
                     Ok(Message::ForwardAck { port, success, host_port }) => {
@@ -610,11 +625,11 @@ async fn run_session(
                     }
                     Err(ControlError::ConnectionClosed) => {
                         warn!("control connection closed by host");
-                        return (SessionOutcome::Disconnected, forwarded);
+                        break 'session SessionOutcome::Disconnected;
                     }
                     Err(e) => {
                         warn!(error = %e, "control channel error");
-                        return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
+                        break 'session SessionOutcome::Error(ContainerError::Control(e));
                     }
                 }
             }
@@ -623,7 +638,7 @@ async fn run_session(
             Some(fail_msg) = fail_rx.recv() => {
                 if let Err(e) = conn.send(&fail_msg).await {
                     warn!(error = %e, "failed to send ConnectFailed");
-                    return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
+                    break 'session SessionOutcome::Error(ContainerError::Control(e));
                 }
             }
 
@@ -635,10 +650,30 @@ async fn run_session(
                         debug!(port, error = %e, "failed to send Unforward during shutdown");
                     }
                 }
-                return (SessionOutcome::Shutdown, forwarded);
+                break 'session SessionOutcome::Shutdown;
             }
         }
+    };
+
+    // Drain in-flight connect handler tasks before returning, so we don't
+    // abandon data connections mid-transfer.
+    connect_handles.retain(|h| !h.is_finished());
+    if !connect_handles.is_empty() {
+        info!(
+            count = connect_handles.len(),
+            "draining in-flight connect handlers"
+        );
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        for handle in connect_handles {
+            let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let _ = tokio::time::timeout(remaining, handle).await;
+        }
     }
+
+    (outcome, forwarded)
 }
 
 #[cfg(test)]
