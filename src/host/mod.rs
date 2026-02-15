@@ -736,7 +736,8 @@ async fn handle_control_connection(
 
             // Process messages from this container until disconnect
             let result =
-                handle_container_messages(&mut conn, &container_id, ctx, connect_req_rx).await;
+                handle_container_messages(&mut conn, &container_id, reg_id, ctx, connect_req_rx)
+                    .await;
 
             // Clean up on disconnect — only if this registration still owns the
             // state. A re-registration replaces the ContainerState with a new
@@ -818,6 +819,7 @@ async fn handle_control_connection(
 async fn handle_container_messages(
     conn: &mut ControlConnection,
     container_id: &str,
+    registration_id: u64,
     ctx: &DaemonContext,
     mut connect_req_rx: mpsc::Receiver<OutboundConnectRequest>,
 ) -> Result<(), ControlError> {
@@ -830,7 +832,7 @@ async fn handle_container_messages(
             result = conn.recv() => {
                 let msg = result?;
                 let was_pong = dispatch_container_message(
-                    msg, conn, container_id, ctx,
+                    msg, conn, container_id, registration_id, ctx,
                 ).await?;
                 if was_pong {
                     missed_pongs = 0;
@@ -877,6 +879,7 @@ async fn dispatch_container_message(
     msg: Message,
     conn: &mut ControlConnection,
     container_id: &str,
+    registration_id: u64,
     ctx: &DaemonContext,
 ) -> Result<bool, ControlError> {
     match msg {
@@ -886,6 +889,18 @@ async fn dispatch_container_message(
             process_name,
             pid,
         } => {
+            // Verify this registration still owns the state. A re-registration
+            // from the same container_id replaces the ContainerState with a new
+            // registration_id. If we've been superseded, stop processing.
+            {
+                let s = ctx.state.lock().await;
+                if s.containers
+                    .get(container_id)
+                    .is_none_or(|c| c.registration_id != registration_id)
+                {
+                    return Err(ControlError::ConnectionClosed);
+                }
+            }
             let result = handle_forward(
                 container_id,
                 port,
@@ -934,6 +949,15 @@ async fn dispatch_container_message(
         }
 
         Message::Unforward { port } => {
+            {
+                let s = ctx.state.lock().await;
+                if s.containers
+                    .get(container_id)
+                    .is_none_or(|c| c.registration_id != registration_id)
+                {
+                    return Err(ControlError::ConnectionClosed);
+                }
+            }
             handle_unforward(container_id, port, &ctx.state).await;
             ctx.browser.lock().await.remove_port_mapping(port);
             info!(container_id, port, "port unforwarded");
@@ -1034,14 +1058,28 @@ async fn handle_forward(
     }
 
     let target_port = {
-        let s = state.lock().await;
-        s.find_available_port(port)
-            .ok_or(ForwardError::NoAvailablePorts)?
+        let mut s = state.lock().await;
+        let tp = s
+            .find_available_port(port)
+            .ok_or(ForwardError::NoAvailablePorts)?;
+        // Reserve the port while still holding the lock so no concurrent
+        // forward can claim the same port before we bind the listener.
+        s.used_host_ports.insert(tp, container_id.to_string());
+        tp
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (host_port, handle) =
-        start_listener(target_port, port, shutdown_rx, client_tx.clone()).await?;
+    let listener_result = start_listener(target_port, port, shutdown_rx, client_tx.clone()).await;
+
+    let (host_port, handle) = match listener_result {
+        Ok(pair) => pair,
+        Err(e) => {
+            // Bind failed — release the reservation.
+            let mut s = state.lock().await;
+            s.used_host_ports.remove(&target_port);
+            return Err(e.into());
+        }
+    };
 
     let now = timestamp_now();
     let tracker = Arc::new(ConnectionTracker::new());
@@ -1060,11 +1098,17 @@ async fn handle_forward(
                 tracker,
             },
         );
-        s.used_host_ports
-            .insert(host_port, container_id.to_string());
+        // Update reservation with actual bound port if it differs
+        // (shouldn't happen with a specific port, but be defensive).
+        if host_port != target_port {
+            s.used_host_ports.remove(&target_port);
+            s.used_host_ports
+                .insert(host_port, container_id.to_string());
+        }
     } else {
         // Container disappeared between start_listener and lock
         // re-acquisition — shut down the orphaned listener.
+        s.used_host_ports.remove(&host_port);
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
         return Err(ForwardError::ContainerGone);
