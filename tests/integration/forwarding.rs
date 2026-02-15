@@ -12,7 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use dbr::control::{self, ControlConnection};
 use dbr::host::proxy::{
-    bridge_connection, new_pending_connections, register_pending, resolve_pending,
+    bridge_connection, new_pending_connections, register_pending, resolve_pending, DataStream,
 };
 use dbr::host::HostConfig;
 use dbr::protocol::{Message, Protocol};
@@ -496,7 +496,11 @@ async fn test_reverse_proxy_pipeline() {
     let (data_stream, mut data_host_end) = tcp_pair().await;
 
     // Resolve the pending with the data stream (host side receives ConnectReady)
-    let resolved = resolve_pending(&pending, &conn_id, data_stream).await;
+    let data = DataStream {
+        stream: data_stream,
+        buffered: Vec::new(),
+    };
+    let resolved = resolve_pending(&pending, &conn_id, data).await;
     assert!(resolved, "pending connection should be resolved");
 
     // 7. Bridge client ↔ data connection in background

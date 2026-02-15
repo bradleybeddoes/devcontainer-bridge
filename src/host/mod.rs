@@ -901,13 +901,21 @@ async fn handle_data_connection(
                 warn!(%addr, "rejecting data connection with oversized conn_id");
                 return Ok(());
             }
-            debug!(%addr, conn_id, "data connection ready");
+            // Extract any data the BufReader has already buffered beyond the
+            // ConnectReady line (e.g. payload from the container's local
+            // service that arrived in the same TCP segment).
+            let buffered = reader.buffer().to_vec();
+            if !buffered.is_empty() {
+                debug!(%addr, conn_id, buffered_bytes = buffered.len(), "data connection has pre-read bytes");
+            } else {
+                debug!(%addr, conn_id, "data connection ready");
+            }
             // Reunite the stream for raw TCP proxying
             let stream = reader
                 .into_inner()
                 .reunite(write_half)
                 .map_err(|e| ControlError::Io(std::io::Error::other(e.to_string())))?;
-            resolve_pending(&pending, &conn_id, stream).await;
+            resolve_pending(&pending, &conn_id, proxy::DataStream { stream, buffered }).await;
             Ok(())
         }
         other => {

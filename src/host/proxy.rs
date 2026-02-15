@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::io::copy_bidirectional;
+use tokio::io::{copy_bidirectional, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
@@ -51,10 +51,24 @@ pub enum ProxyError {
     },
 }
 
+/// A data connection with any data that was pre-read during the handshake.
+///
+/// When reading the `ConnectReady` message from the data port, the `BufReader`
+/// may buffer data beyond the handshake line (e.g., data from the container's
+/// local service that arrived in the same TCP segment). This struct carries
+/// that pre-read data so it can be written to the client before starting the
+/// bidirectional bridge.
+pub struct DataStream {
+    /// The raw TCP stream (after the ConnectReady line has been consumed).
+    pub stream: TcpStream,
+    /// Data that was buffered beyond the ConnectReady handshake line.
+    pub buffered: Vec<u8>,
+}
+
 /// Shared map of pending connections waiting for `ConnectReady`.
 ///
 /// Key is `conn_id`, value is a oneshot sender that delivers the data stream.
-pub type PendingConnections = Arc<Mutex<HashMap<String, oneshot::Sender<TcpStream>>>>;
+pub type PendingConnections = Arc<Mutex<HashMap<String, oneshot::Sender<DataStream>>>>;
 
 /// Create a new empty pending connections map.
 pub fn new_pending_connections() -> PendingConnections {
@@ -75,7 +89,7 @@ const MAX_PENDING: usize = 1024;
 pub async fn register_pending(
     pending: &PendingConnections,
     conn_id: String,
-) -> oneshot::Receiver<TcpStream> {
+) -> oneshot::Receiver<DataStream> {
     let (tx, rx) = oneshot::channel();
     let mut map = pending.lock().await;
     if map.len() >= MAX_PENDING {
@@ -98,12 +112,12 @@ pub async fn register_pending(
 pub async fn resolve_pending(
     pending: &PendingConnections,
     conn_id: &str,
-    data_stream: TcpStream,
+    data: DataStream,
 ) -> bool {
     let sender = pending.lock().await.remove(conn_id);
     match sender {
         Some(tx) => {
-            if tx.send(data_stream).is_ok() {
+            if tx.send(data).is_ok() {
                 debug!(conn_id, "resolved pending connection");
                 true
             } else {
@@ -145,15 +159,32 @@ pub async fn cancel_pending(pending: &PendingConnections, conn_id: &str) {
 pub async fn bridge_connection(
     conn_id: String,
     mut client_stream: TcpStream,
-    data_rx: oneshot::Receiver<TcpStream>,
+    data_rx: oneshot::Receiver<DataStream>,
     pending: &PendingConnections,
 ) -> Result<(u64, u64), ProxyError> {
     let data_stream = tokio::time::timeout(CONNECT_TIMEOUT, data_rx).await;
 
     match data_stream {
-        Ok(Ok(mut data_stream)) => {
+        Ok(Ok(DataStream {
+            mut stream,
+            buffered,
+        })) => {
+            // Write any data that was pre-read during the ConnectReady handshake.
+            // The BufReader may have buffered data beyond the handshake line
+            // (e.g., the first payload from the container's local service).
+            let pre_read = buffered.len() as u64;
+            if !buffered.is_empty() {
+                debug!(conn_id, pre_read_bytes = pre_read, "flushing pre-read data to client");
+                client_stream.write_all(&buffered).await.map_err(|source| {
+                    ProxyError::Io {
+                        conn_id: conn_id.clone(),
+                        source,
+                    }
+                })?;
+            }
+
             debug!(conn_id, "bridging client and data streams");
-            let result = copy_bidirectional(&mut client_stream, &mut data_stream)
+            let result = copy_bidirectional(&mut client_stream, &mut stream)
                 .await
                 .map_err(|source| ProxyError::Io {
                     conn_id: conn_id.clone(),
@@ -162,10 +193,10 @@ pub async fn bridge_connection(
             info!(
                 conn_id,
                 client_to_container = result.0,
-                container_to_client = result.1,
+                container_to_client = result.1 + pre_read,
                 "proxy connection completed"
             );
-            Ok(result)
+            Ok((result.0, result.1 + pre_read))
         }
         Ok(Err(_)) => {
             // Sender dropped — connection was cancelled or failed
@@ -208,7 +239,11 @@ mod tests {
         let rx = register_pending(&pending, conn_id.clone()).await;
 
         let (stream, _peer) = tcp_pair().await;
-        assert!(resolve_pending(&pending, &conn_id, stream).await);
+        let data = DataStream {
+            stream,
+            buffered: Vec::new(),
+        };
+        assert!(resolve_pending(&pending, &conn_id, data).await);
 
         let _data_stream = rx.await.unwrap();
         assert!(pending.lock().await.is_empty());
@@ -218,7 +253,11 @@ mod tests {
     async fn resolve_unknown_conn_id_returns_false() {
         let pending = new_pending_connections();
         let (stream, _peer) = tcp_pair().await;
-        assert!(!resolve_pending(&pending, "unknown", stream).await);
+        let data = DataStream {
+            stream,
+            buffered: Vec::new(),
+        };
+        assert!(!resolve_pending(&pending, "unknown", data).await);
     }
 
     #[tokio::test]
@@ -245,7 +284,11 @@ mod tests {
         let (data_stream, mut data_local) = tcp_pair().await;
 
         // Resolve the pending connection with the data stream
-        assert!(resolve_pending(&pending, &conn_id, data_stream).await);
+        let data = DataStream {
+            stream: data_stream,
+            buffered: Vec::new(),
+        };
+        assert!(resolve_pending(&pending, &conn_id, data).await);
 
         // Bridge in a background task
         let bridge_pending = pending.clone();
