@@ -632,12 +632,17 @@ async fn handle_control_connection(
                 return Ok(());
             }
 
-            // Enforce container limit and detect re-registration in a
-            // single lock acquisition to avoid TOCTOU between the two checks.
-            let is_reregistration = {
-                let s = ctx.state.lock().await;
-                let already_registered = s.containers.contains_key(&container_id);
-                if s.containers.len() >= MAX_CONTAINERS && !already_registered {
+            // Enforce container limit and atomically remove stale state if
+            // this container_id is already registered (e.g. reconnect after
+            // network disruption before heartbeat timeout). Both checks and
+            // the removal happen under a single lock acquisition so a third
+            // concurrent connection cannot slip in between.
+            let old_forwards = {
+                let mut s = ctx.state.lock().await;
+                let old_state = s.containers.remove(&container_id);
+                if old_state.is_none()
+                    && s.containers.len() >= MAX_CONTAINERS
+                {
                     warn!(
                         %addr, container_id,
                         max = MAX_CONTAINERS,
@@ -646,14 +651,31 @@ async fn handle_control_connection(
                     conn.send(&Message::RegisterAck { success: false }).await?;
                     return Ok(());
                 }
-                already_registered
+                // Extract forwards and free host ports while still holding the lock
+                old_state.map(|cstate| {
+                    warn!(%addr, container_id, "re-registration, cleaning up old state");
+                    cstate
+                        .forwards
+                        .into_iter()
+                        .map(|(port, fstate)| {
+                            s.used_host_ports.remove(&fstate.host_port);
+                            let _ = fstate.shutdown_tx.send(true);
+                            (port, fstate.handle, fstate.tracker)
+                        })
+                        .collect::<Vec<_>>()
+                })
             };
 
-            // Clean up stale state if this container_id is already registered
-            // (e.g. reconnect after network disruption before heartbeat timeout)
-            if is_reregistration {
-                warn!(%addr, container_id, "re-registration, cleaning up old state");
-                cleanup_container(&container_id, &ctx.state).await;
+            // Tear down old forwards outside the lock
+            if let Some(forwards) = old_forwards {
+                let mut drain_set = tokio::task::JoinSet::new();
+                for (port, handle, tracker) in forwards {
+                    let _ = handle.await;
+                    drain_set.spawn(async move {
+                        drain_forward_connections(&tracker, port, DEFAULT_DRAIN_TIMEOUT).await;
+                    });
+                }
+                while drain_set.join_next().await.is_some() {}
             }
 
             info!(
