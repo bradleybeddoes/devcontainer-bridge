@@ -96,14 +96,22 @@ pub enum HostError {
 
 /// Tracks active proxy connection count with drain notification.
 ///
+/// Each forwarded port has a `ConnectionTracker` shared between the
+/// listener accept loop and the proxy bridge tasks. When a forward is
+/// being torn down, the caller awaits [`wait_drained`] which unblocks
+/// once all in-flight proxy connections have finished.
+///
 /// Uses `Notify::notify_one` which stores a permit when no waiter
 /// is present, so `wait_drained` never misses a zero-crossing.
 struct ConnectionTracker {
+    /// Number of active proxy connections through this forward.
     count: AtomicUsize,
+    /// Notified when `count` drops to zero.
     drained: Notify,
 }
 
 impl ConnectionTracker {
+    /// Create a tracker with zero active connections.
     fn new() -> Self {
         Self {
             count: AtomicUsize::new(0),
@@ -111,20 +119,24 @@ impl ConnectionTracker {
         }
     }
 
+    /// Record a new proxy connection starting.
     fn increment(&self) {
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a proxy connection finishing; notifies drain waiters on zero.
     fn decrement(&self) {
         if self.count.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.drained.notify_one();
         }
     }
 
+    /// Return the current number of active connections.
     fn active(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }
 
+    /// Wait until all active connections have finished.
     async fn wait_drained(&self) {
         while self.active() > 0 {
             self.drained.notified().await;
@@ -132,7 +144,11 @@ impl ConnectionTracker {
     }
 }
 
-/// State for a single forwarded port.
+/// Per-port forwarding state.
+///
+/// Created when a container sends `Forward` and removed on `Unforward`
+/// or container disconnect. Owns the listener shutdown channel and
+/// tracks active proxy connections for graceful draining.
 #[allow(dead_code)] // handle is stored to prevent task detach; awaited in future phases
 struct ForwardState {
     /// The port bound on the host.
@@ -151,7 +167,12 @@ struct ForwardState {
     tracker: Arc<ConnectionTracker>,
 }
 
-/// A request to send a ConnectRequest to a container via its control connection.
+/// A request queued from a client connection handler to be sent to a
+/// container via its control channel.
+///
+/// Routed through an `mpsc` channel so that the container message loop
+/// (which owns the `ControlConnection` write half) serializes outbound
+/// `ConnectRequest` messages without concurrent write conflicts.
 struct OutboundConnectRequest {
     /// The container port the client wants to reach.
     port: u16,
@@ -159,7 +180,10 @@ struct OutboundConnectRequest {
     conn_id: String,
 }
 
-/// State for a connected container.
+/// Per-container state stored while a container is registered.
+///
+/// Holds the container's active forwards and the channel used to
+/// route `ConnectRequest` messages to its control connection handler.
 struct ContainerState {
     /// Human-readable hostname.
     hostname: String,
@@ -169,7 +193,11 @@ struct ContainerState {
     connect_request_tx: mpsc::Sender<OutboundConnectRequest>,
 }
 
-/// Shared state for the host daemon.
+/// Top-level mutable state for the host daemon, protected by a `Mutex`.
+///
+/// Contains all connected containers and the set of host ports in use.
+/// Port allocation, container lookup, and forward-info collection all
+/// operate on this struct.
 struct HostState {
     /// Connected containers: container_id → ContainerState.
     containers: HashMap<String, ContainerState>,

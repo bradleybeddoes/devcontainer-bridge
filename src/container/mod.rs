@@ -26,13 +26,21 @@ use self::filter::PortFilter;
 use self::scanner::{ListeningPort, ScanError};
 
 /// Exponential backoff with reset, encapsulating retry delay state.
+///
+/// Used by the container daemon reconnection loop to progressively
+/// slow down connection attempts on repeated failures, then reset
+/// to the initial delay on a successful connection.
 struct Backoff {
+    /// Current delay before the next retry.
     current: Duration,
+    /// Delay used on the first retry and after [`reset`].
     initial: Duration,
+    /// Upper bound; [`escalate`] will not exceed this.
     max: Duration,
 }
 
 impl Backoff {
+    /// Create a new backoff starting at `initial`, capped at `max`.
     fn new(initial: Duration, max: Duration) -> Self {
         Self {
             current: initial,
