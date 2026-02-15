@@ -85,6 +85,10 @@ enum ForwardError {
         max: usize,
     },
 
+    /// All host ports are in use.
+    #[error("no available host ports")]
+    NoAvailablePorts,
+
     /// Failed to bind the per-port listener.
     #[error(transparent)]
     Listener(#[from] ListenerError),
@@ -263,21 +267,25 @@ impl HostState {
     /// Find the next available host port starting from `preferred`.
     ///
     /// Returns `preferred` if it is free, otherwise scans upward
-    /// wrapping around the port space. Returns `0` if every port
-    /// is in use (the subsequent bind will fail cleanly).
-    fn find_available_port(&self, preferred: u16) -> u16 {
+    /// through unprivileged ports (≥ 1024), wrapping around the port
+    /// space. Returns `None` if every port is in use.
+    fn find_available_port(&self, preferred: u16) -> Option<u16> {
+        if preferred == 0 {
+            return None;
+        }
         let mut port = preferred;
         while self.used_host_ports.contains_key(&port) {
             port = port.wrapping_add(1);
-            if port == 0 {
+            // Skip privileged ports unless that was the user's preference
+            if port < 1024 && port != preferred {
                 port = 1024;
             }
             if port == preferred {
                 // Wrapped all the way around — no ports available
-                return 0;
+                return None;
             }
         }
-        port
+        Some(port)
     }
 
     /// Find which container owns a given container port forward.
@@ -952,6 +960,7 @@ async fn handle_forward(
     let target_port = {
         let s = state.lock().await;
         s.find_available_port(port)
+            .ok_or(ForwardError::NoAvailablePorts)?
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
