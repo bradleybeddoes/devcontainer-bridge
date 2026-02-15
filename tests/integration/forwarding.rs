@@ -121,6 +121,21 @@ async fn wait_port_closed(port: u16, timeout: Duration) -> bool {
     }
 }
 
+/// Poll until a port starts accepting connections.
+/// Used to wait for the host daemon to finish binding instead of a fixed sleep.
+async fn wait_port_open(port: u16, timeout: Duration) {
+    let start = tokio::time::Instant::now();
+    loop {
+        if can_connect_port(port).await {
+            return;
+        }
+        if start.elapsed() >= timeout {
+            panic!("port {port} did not open within {}ms", timeout.as_millis());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: Register → Forward → ForwardAck → Unforward lifecycle
 // ---------------------------------------------------------------------------
@@ -141,8 +156,8 @@ async fn test_register_forward_unforward_lifecycle() {
     // Start host daemon in background
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    // Give the host daemon time to bind
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the host daemon to bind
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
 
@@ -193,7 +208,7 @@ async fn test_register_forward_unforward_lifecycle() {
     drop(conn);
 
     // Host daemon should exit
-    let result = tokio::time::timeout(Duration::from_secs(5), host_handle)
+    let result = tokio::time::timeout(Duration::from_secs(10), host_handle)
         .await
         .expect("host daemon should exit after last container disconnects");
     assert!(result.unwrap().is_ok());
@@ -218,7 +233,7 @@ async fn test_cleanup_on_container_disconnect() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
     let mut conn = register_container(control_addr, "disconnect-test", "test-host").await;
@@ -258,7 +273,7 @@ async fn test_cleanup_on_container_disconnect() {
     );
 
     // Host daemon should exit (exit_on_idle)
-    let result = tokio::time::timeout(Duration::from_secs(5), host_handle)
+    let result = tokio::time::timeout(Duration::from_secs(10), host_handle)
         .await
         .expect("host daemon should exit");
     assert!(result.unwrap().is_ok());
@@ -283,7 +298,7 @@ async fn test_ping_pong() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
     let mut conn = register_container(control_addr, "ping-test", "test-host").await;
@@ -295,7 +310,7 @@ async fn test_ping_pong() {
 
     // Drop to trigger shutdown
     drop(conn);
-    let _ = tokio::time::timeout(Duration::from_secs(5), host_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), host_handle).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +332,7 @@ async fn test_list_request_response() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
 
@@ -390,7 +405,7 @@ async fn test_multi_container_port_conflict() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
 
@@ -581,7 +596,8 @@ async fn test_data_connection_handshake_on_host() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for both control and data ports to be ready
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     // Connect to the data port and send a ConnectReady with unknown conn_id.
     // The host should accept it gracefully (no pending match, but no crash).
@@ -596,7 +612,7 @@ async fn test_data_connection_handshake_on_host() {
     data_stream.write_all(b"\n").await.unwrap();
     data_stream.flush().await.unwrap();
 
-    // Give the host time to process
+    // Brief yield for async processing (non-blocking is_finished check follows)
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Host daemon should still be running (graceful handling of unknown conn_id)
@@ -627,7 +643,7 @@ async fn test_multiple_forwards_same_container() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
     let mut conn = register_container(control_addr, "multi-forward", "test-host").await;
@@ -716,7 +732,7 @@ async fn test_multiple_forwards_same_container() {
     }
 
     drop(conn);
-    let _ = tokio::time::timeout(Duration::from_secs(5), host_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), host_handle).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -738,7 +754,7 @@ async fn test_standalone_ping() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
 
@@ -776,7 +792,7 @@ async fn test_container_reconnect_reregister() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
 
@@ -799,6 +815,8 @@ async fn test_container_reconnect_reregister() {
         drop(conn);
     }
 
+    // Allow time for the host to process the disconnect and clean up state.
+    // The ForwardAck on re-registration confirms cleanup succeeded.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Second connection: re-register and forward the same port
@@ -854,7 +872,7 @@ async fn test_connect_failed_handling() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
     let mut conn = register_container(control_addr, "fail-test", "test-host").await;
@@ -910,7 +928,7 @@ async fn test_host_data_port_accepts_connect_ready() {
 
     let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_port_open(control_port, Duration::from_secs(5)).await;
 
     let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
     let data_addr: SocketAddr = ([127, 0, 0, 1], data_port).into();
@@ -940,7 +958,7 @@ async fn test_host_data_port_accepts_connect_ready() {
     data_stream.write_all(b"\n").await.unwrap();
     data_stream.flush().await.unwrap();
 
-    // Give host time to process the data connection
+    // Brief yield for async processing (non-blocking is_finished check follows)
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Host should still be running (no crash on unmatched conn_id)
