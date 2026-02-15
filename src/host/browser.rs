@@ -76,10 +76,10 @@ pub fn validate_url(url: &str) -> Result<(), BrowserError> {
     Ok(())
 }
 
-/// Rewrite `localhost` or `127.0.0.1` ports in a URL using the port map.
+/// Rewrite loopback ports in a URL using the port map.
 ///
-/// If the URL contains `localhost:PORT` or `127.0.0.1:PORT` and `PORT` is a
-/// key in `port_map`, the port is replaced with the mapped host port.
+/// Matches `localhost:PORT`, `127.0.0.1:PORT`, and `[::1]:PORT`. If `PORT`
+/// is a key in `port_map`, the port is replaced with the mapped host port.
 ///
 /// # Examples
 ///
@@ -106,7 +106,7 @@ pub fn rewrite_url(url: &str, port_map: &HashMap<u16, u16>) -> String {
     let rest = &url[scheme_end..];
     let lower_rest = rest.to_ascii_lowercase();
 
-    for host_prefix in ["localhost:", "127.0.0.1:"] {
+    for host_prefix in ["localhost:", "127.0.0.1:", "[::1]:"] {
         if !lower_rest.starts_with(host_prefix) {
             continue;
         }
@@ -416,6 +416,16 @@ mod tests {
         assert_eq!(
             rewrite_url("http://localhost:3000/page#section", &map),
             "http://localhost:3001/page#section"
+        );
+    }
+
+    #[test]
+    fn rewrite_ipv6_loopback_port() {
+        let mut map = HashMap::new();
+        map.insert(3000, 3001);
+        assert_eq!(
+            rewrite_url("http://[::1]:3000/callback", &map),
+            "http://[::1]:3001/callback"
         );
     }
 
