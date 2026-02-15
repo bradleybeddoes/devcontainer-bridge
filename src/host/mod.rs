@@ -781,6 +781,12 @@ async fn handle_control_connection(
             conn.send(&Message::Pong).await?;
             Ok(())
         }
+        Message::Unforward { port } => {
+            // One-shot Unforward from `dbr unforward` (no registration needed).
+            // Searches all containers for the port.
+            handle_unforward_global(port, &ctx.state, &ctx.browser).await;
+            Ok(())
+        }
         Message::OpenUrl { url } => {
             // One-shot OpenUrl from `dbr open` (no registration needed)
             let success = ctx
@@ -1065,6 +1071,44 @@ async fn handle_forward(
     }
 
     Ok(host_port)
+}
+
+/// Handle an administrative Unforward: search all containers for the port.
+///
+/// Used by `dbr unforward` CLI (one-shot, no registration).
+async fn handle_unforward_global(
+    port: u16,
+    state: &Mutex<HostState>,
+    browser: &Mutex<BrowserOpener>,
+) {
+    let forward = {
+        let mut s = state.lock().await;
+        let owner = s
+            .containers
+            .iter()
+            .find(|(_, c)| c.forwards.contains_key(&port))
+            .map(|(cid, _)| cid.clone());
+        owner.and_then(|cid| {
+            let fstate = s
+                .containers
+                .get_mut(&cid)
+                .and_then(|c| c.forwards.remove(&port));
+            if let Some(ref f) = fstate {
+                s.used_host_ports.remove(&f.host_port);
+            }
+            fstate
+        })
+    };
+
+    if let Some(fstate) = forward {
+        browser.lock().await.remove_port_mapping(port);
+        let _ = fstate.shutdown_tx.send(true);
+        let _ = fstate.handle.await;
+        drain_forward_connections(&fstate.tracker, port, DEFAULT_DRAIN_TIMEOUT).await;
+        info!(port, "port unforwarded (admin)");
+    } else {
+        info!(port, "no active forward found for port");
+    }
 }
 
 /// Handle an Unforward request: stop the listener and drain active connections.
