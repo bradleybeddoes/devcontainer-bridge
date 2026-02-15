@@ -1,1 +1,20 @@
+# Build artifacts
 /target
+
+# Editor and IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment and secrets
+.env
+.env.*
+
+# PID files (created by dbr ensure)
+*.pid
+
+# Log files (created by --log-file)
+*.log
