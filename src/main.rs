@@ -415,41 +415,39 @@ fn init_tracing(log_level: &str, log_format: &str, log_file: Option<&str>) {
     let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
     let use_json = log_format.eq_ignore_ascii_case("json");
 
-    if let Some(path) = log_file {
-        let file = match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("warning: could not open log file {path}: {e}, falling back to stderr");
-                if use_json {
-                    fmt().json().with_env_filter(filter).init();
-                } else {
-                    fmt().with_env_filter(filter).init();
-                }
-                return;
+    // Macro reduces the json/text branching to a single call-site.
+    // The tracing_subscriber builder returns different concrete types
+    // for `.json()` vs plain, so a macro is the simplest dedup.
+    macro_rules! init_subscriber {
+        ($builder:expr) => {
+            if use_json {
+                $builder.json().with_env_filter(filter).init();
+            } else {
+                $builder.with_env_filter(filter).init();
             }
         };
+    }
 
-        if use_json {
-            fmt()
-                .json()
-                .with_env_filter(filter)
-                .with_writer(file)
-                .with_ansi(false)
-                .init();
-        } else {
-            fmt()
-                .with_env_filter(filter)
-                .with_writer(file)
-                .with_ansi(false)
-                .init();
+    match log_file {
+        Some(path) => {
+            let file = match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!(
+                        "warning: could not open log file {path}: {e}, falling back to stderr"
+                    );
+                    init_subscriber!(fmt());
+                    return;
+                }
+            };
+            init_subscriber!(fmt().with_writer(file).with_ansi(false));
         }
-    } else if use_json {
-        fmt().json().with_env_filter(filter).init();
-    } else {
-        fmt().with_env_filter(filter).init();
+        None => {
+            init_subscriber!(fmt());
+        }
     }
 }
