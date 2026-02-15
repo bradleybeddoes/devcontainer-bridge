@@ -55,6 +55,19 @@ const MAX_IDENTIFIER_LENGTH: usize = 256;
 /// Maximum length of a conn_id string.
 const MAX_CONN_ID_LENGTH: usize = 128;
 
+/// Check whether an identifier (container_id or hostname) is safe.
+///
+/// Rejects empty strings, strings exceeding [`MAX_IDENTIFIER_LENGTH`],
+/// and strings containing characters outside the allowed set
+/// (alphanumeric, hyphen, underscore, dot) to prevent log injection
+/// via control characters or newlines.
+fn is_valid_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_IDENTIFIER_LENGTH
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
 /// Errors that can occur when handling a Forward request.
 #[derive(Debug, Error)]
 enum ForwardError {
@@ -174,7 +187,6 @@ impl ConnectionTracker {
 /// Created when a container sends `Forward` and removed on `Unforward`
 /// or container disconnect. Owns the listener shutdown channel and
 /// tracks active proxy connections for graceful draining.
-#[allow(dead_code)] // handle is stored to prevent task detach; awaited in future phases
 struct ForwardState {
     /// The port bound on the host.
     host_port: u16,
@@ -294,7 +306,7 @@ impl HostState {
 /// single reference instead of 4+ separate parameters.
 struct DaemonContext {
     /// Protected host daemon state (containers, port allocations).
-    state: Arc<Mutex<HostState>>,
+    state: Mutex<HostState>,
     /// Pending reverse data connections awaiting `ConnectReady`.
     pending: PendingConnections,
     /// Browser opener with port rewriting and rate limiting.
@@ -351,12 +363,13 @@ impl Default for HostConfig {
 ///
 /// Returns `true` if the `docker info` command exits successfully, indicating
 /// Docker (Desktop or Engine) is available and running.
-fn detect_docker() -> bool {
-    std::process::Command::new("docker")
+async fn detect_docker() -> bool {
+    tokio::process::Command::new("docker")
         .arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
+        .await
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -368,7 +381,7 @@ fn detect_docker() -> bool {
 /// 2. `config.no_docker_detect` set -> bind to `127.0.0.1`
 /// 3. Docker detected via `docker info` -> bind to `0.0.0.0`
 /// 4. No Docker detected -> bind to `127.0.0.1`
-fn resolve_bind_addr(config: &HostConfig) -> std::net::IpAddr {
+async fn resolve_bind_addr(config: &HostConfig) -> std::net::IpAddr {
     if let Some(addr) = config.bind_addr {
         info!("Using configured bind address {}", addr);
         return addr;
@@ -383,7 +396,7 @@ fn resolve_bind_addr(config: &HostConfig) -> std::net::IpAddr {
         return addr;
     }
 
-    if detect_docker() {
+    if detect_docker().await {
         let addr = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
         info!(
             "Docker detected, binding control/data ports to {} for container connectivity. \
@@ -423,7 +436,7 @@ fn timestamp_now() -> String {
 ///
 /// Returns [`HostError`] if the daemon cannot start (e.g. port bind failure).
 pub async fn run(config: HostConfig) -> Result<(), HostError> {
-    let bind_addr = resolve_bind_addr(&config);
+    let bind_addr = resolve_bind_addr(&config).await;
 
     let control_listener = ControlListener::bind(bind_addr, config.control_port)
         .await
@@ -459,7 +472,7 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
     let (client_tx, mut client_rx) = mpsc::channel::<ClientConnection>(256);
 
     let ctx = Arc::new(DaemonContext {
-        state: Arc::new(Mutex::new(HostState::new())),
+        state: Mutex::new(HostState::new()),
         pending: new_pending_connections(),
         browser: Arc::new(Mutex::new(BrowserOpener::with_cmd(
             config.browser_cmd.clone(),
@@ -582,15 +595,13 @@ async fn handle_control_connection(
             container_id,
             hostname,
         } => {
-            // Validate field lengths to prevent abuse via oversized identifiers
-            if container_id.len() > MAX_IDENTIFIER_LENGTH || hostname.len() > MAX_IDENTIFIER_LENGTH
-            {
+            // Validate identifier content and length
+            if !is_valid_identifier(&container_id) || !is_valid_identifier(&hostname) {
                 warn!(
                     %addr,
                     container_id_len = container_id.len(),
                     hostname_len = hostname.len(),
-                    max = MAX_IDENTIFIER_LENGTH,
-                    "rejecting registration: identifier too long"
+                    "rejecting registration: invalid identifier"
                 );
                 conn.send(&Message::RegisterAck { success: false }).await?;
                 return Ok(());
@@ -608,6 +619,17 @@ async fn handle_control_connection(
                     );
                     conn.send(&Message::RegisterAck { success: false }).await?;
                     return Ok(());
+                }
+            }
+
+            // Clean up stale state if this container_id is already registered
+            // (e.g. reconnect after network disruption before heartbeat timeout)
+            {
+                let s = ctx.state.lock().await;
+                if s.containers.contains_key(&container_id) {
+                    warn!(%addr, container_id, "re-registration, cleaning up old state");
+                    drop(s);
+                    cleanup_container(&container_id, &ctx.state).await;
                 }
             }
 
@@ -864,12 +886,17 @@ async fn dispatch_container_message(
 }
 
 /// Handle a Forward request: bind a listener and track the forward.
+///
+/// The port availability check and listener bind are not atomic — another
+/// concurrent Forward could race to the same port. This is benign: the
+/// loser's `start_listener` bind fails with a `ListenerError`, which is
+/// propagated as a `ForwardAck { success: false }` to the container.
 async fn handle_forward(
     container_id: &str,
     port: u16,
     process_name: Option<String>,
     pid: Option<u32>,
-    state: &Arc<Mutex<HostState>>,
+    state: &Mutex<HostState>,
     client_tx: &mpsc::Sender<ClientConnection>,
 ) -> Result<u16, ForwardError> {
     // Enforce per-container forward limit
@@ -923,7 +950,7 @@ async fn handle_forward(
 }
 
 /// Handle an Unforward request: stop the listener and drain active connections.
-async fn handle_unforward(container_id: &str, port: u16, state: &Arc<Mutex<HostState>>) {
+async fn handle_unforward(container_id: &str, port: u16, state: &Mutex<HostState>) {
     let forward = {
         let mut s = state.lock().await;
         s.containers
@@ -942,7 +969,7 @@ async fn handle_unforward(container_id: &str, port: u16, state: &Arc<Mutex<HostS
 }
 
 /// Clean up all state for a disconnected container.
-async fn cleanup_container(container_id: &str, state: &Arc<Mutex<HostState>>) {
+async fn cleanup_container(container_id: &str, state: &Mutex<HostState>) {
     let forwards = {
         let mut s = state.lock().await;
         let Some(cstate) = s.containers.remove(container_id) else {
