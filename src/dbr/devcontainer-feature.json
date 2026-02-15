@@ -11,6 +11,7 @@
       "description": "Version of dbr to install. Use 'latest' for the most recent release, or a specific tag like 'v0.1.0'."
     }
   },
+  "postStartCommand": "dbr-start-daemon",
   "installsAfter": [
     "ghcr.io/devcontainers/features/common-utils"
   ],
