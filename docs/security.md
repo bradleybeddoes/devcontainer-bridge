@@ -1,0 +1,221 @@
+# Security Model
+
+This document describes the threat model, security guarantees, and audit guidance for Devcontainer Bridge (`dbr`).
+
+## Threat Model
+
+### What we protect against
+
+- **Network exposure of forwarded ports.** All listeners bind to loopback only (`127.0.0.1` / `[::1]`). A forwarded port is never reachable from the network.
+- **Arbitrary command execution from containers.** The host daemon accepts a fixed set of protocol messages. A container cannot instruct the host to run arbitrary commands. The only host-side actions are binding loopback ports and opening validated URLs.
+- **URL-based attacks.** Only `http://` and `https://` URLs are accepted. Schemes like `file://`, `javascript:`, and `ftp://` are rejected. URLs are length-capped and rate-limited.
+- **Resource exhaustion.** Control messages are capped at 64 KB. Per-container forward limits (128), total container limits (64), and rate limiting on URL opens (5/sec) prevent a runaway or malicious container from overwhelming the host.
+- **Protocol abuse.** Malformed JSON, oversized messages, and unexpected message types are handled gracefully without crashing.
+
+### What is out of scope
+
+- **Malicious code on the host.** If an attacker has code execution on the host, they can already access anything on loopback. `dbr` does not make this worse.
+- **Container-to-container isolation.** Containers are isolated by Docker networking. `dbr` does not create cross-container communication paths.
+- **Encrypted transport.** The control and data channels use plaintext TCP on loopback. Since both endpoints are on the same machine (or within the Docker Desktop VM), TLS is unnecessary — the same trust boundary as Docker Desktop port publishing, `kubectl port-forward`, and SSH `-L` tunnels.
+- **Authentication between daemons.** Any process on the host can connect to the control port. This matches the security model of Docker Desktop (any local process can talk to the Docker socket) and `kubectl` (any local process can use the forwarded port).
+
+## Localhost-Only Binding
+
+All TCP listeners in `dbr` bind exclusively to loopback addresses:
+
+| Listener | Bind address | Port | Source |
+|----------|-------------|------|--------|
+| Control channel | `127.0.0.1` | 19285 | `src/control.rs:136` |
+| Data channel | `127.0.0.1` | 19286 | `src/host/mod.rs:232` |
+| Forwarded ports | `[::1]` then `127.0.0.1` | per-port | `src/host/listener.rs:48-62` |
+
+The codebase **never** binds to `0.0.0.0` or `[::]`. This is enforced as a project invariant in `CLAUDE.md` and checked by the security audit.
+
+### Why this is sufficient
+
+This is the same security model used by:
+
+- **Docker Desktop** — publishes container ports to `localhost` only on macOS/Windows
+- **kubectl port-forward** — binds to `127.0.0.1` by default
+- **SSH local forwarding (`-L`)** — binds to loopback by default
+
+On a typical developer workstation, processes on loopback are trusted at the same level as the logged-in user. No network-facing exposure is created.
+
+## URL Validation
+
+When a container sends an `OpenUrl` message, the host daemon validates the URL before passing it to `open` (macOS) or `xdg-open` (Linux).
+
+### Validation rules
+
+1. **Scheme whitelist:** Only `http://` and `https://` are accepted (case-insensitive on both the container client and host daemon). All other schemes (`file://`, `ftp://`, `javascript:`, `data:`, etc.) are rejected with `BrowserError::InvalidScheme`.
+2. **Length cap:** URLs longer than 2048 characters are rejected with `BrowserError::UrlTooLong`.
+3. **Control character rejection:** URLs containing ASCII control characters (newlines, null bytes, tabs, etc.) are rejected with `BrowserError::InvalidCharacters`. This prevents log injection and argument confusion.
+4. **Rate limiting:** A sliding window allows at most 5 URL opens per second. Excess requests are rejected with `BrowserError::RateLimited`.
+
+### Command injection prevention
+
+The URL is passed as a single argument to `Command::new("open").arg(url)` (or `xdg-open`). It is **not** passed through a shell, so shell metacharacters in the URL cannot cause command injection. See `src/host/browser.rs:144-150`.
+
+### Port rewriting
+
+When a container port is forwarded to a different host port (due to conflicts), `localhost:PORT` and `127.0.0.1:PORT` in URLs are rewritten to use the correct host port. Only these two host patterns are rewritten — external hostnames are never modified.
+
+## Control Channel Hardening
+
+### Message size limits
+
+Every control message is bounded to **64 KB** (`MAX_MESSAGE_SIZE` in `src/control.rs:17`). The `read_message` function uses a bounded read strategy: it checks buffer length against the limit before allocating, preventing memory exhaustion from a peer that sends data without a newline terminator.
+
+### Protocol strictness
+
+- Messages must be valid JSON matching a known `Message` variant (internally tagged with `"type"`).
+- Unknown `"type"` values are deserialization errors.
+- Unknown fields within a known message type are deserialization errors (`deny_unknown_fields` is enforced on the `Message` enum and `ForwardInfo`).
+- Missing required fields are deserialization errors.
+- Port values (`u16`) that are negative or exceed 65535 are rejected by serde deserialization.
+- The data channel handshake (`ConnectReady`) uses the same bounded read, then switches to raw TCP proxying — no further JSON parsing occurs on data connections.
+
+### Field length limits
+
+- `container_id` and `hostname` in `Register` messages are limited to 256 characters. Oversized identifiers are rejected with `RegisterAck{success: false}`.
+- `conn_id` values in `ConnectReady` and `ConnectFailed` are limited to 128 characters. Oversized values are silently dropped.
+
+### Connection limits
+
+| Limit | Value | Location |
+|-------|-------|----------|
+| Max containers | 64 | `src/host/mod.rs:47` |
+| Max forwards per container | 128 | `src/host/mod.rs:50` |
+| Max pending connections | 1024 | `src/host/proxy.rs:65` |
+| Control message size | 64 KB | `src/control.rs:17` |
+| Container ID / hostname length | 256 chars | `src/host/mod.rs:53` |
+| Connection ID length | 128 chars | `src/host/mod.rs:56` |
+| URL length | 2048 chars | `src/host/browser.rs:15` |
+| URL open rate | 5/sec | `src/host/browser.rs:18` |
+| ConnectRequest timeout | 10 sec | `src/host/proxy.rs:20` |
+| Heartbeat interval | 30 sec | `src/host/mod.rs:38` |
+| Missed pongs before disconnect | 3 | `src/host/mod.rs:41` |
+
+### Heartbeat and dead connection detection
+
+The host daemon sends `Ping` messages every 30 seconds on each container's control connection. If 3 consecutive pings go unanswered, the container is considered dead and all its forwards are torn down. This prevents leaked listeners from accumulating when containers crash without a clean disconnect.
+
+## No Elevated Privileges
+
+Neither daemon requires root or elevated privileges:
+
+- **Container daemon** reads `/proc/net/tcp` and `/proc/net/tcp6`, which are world-readable in Linux.
+- **Container daemon** binds no ports — it only initiates outbound TCP connections.
+- **Host daemon** binds to unprivileged ports (19285, 19286, and forwarded ports >= 1024 by default).
+- **No Docker socket access.** The container daemon does not need `/var/run/docker.sock`. It communicates with the host daemon over TCP only.
+
+The minimum forwarded port is configurable (default: 1024) to prevent privileged port forwarding without explicit opt-in.
+
+## Auditability
+
+All security-relevant events are logged with structured fields:
+
+- Container registration and disconnection (with container ID and hostname)
+- Port forward and unforward (with container ID, port, process name, PID)
+- URL opens (with original and rewritten URL)
+- Port conflicts and alternative port assignment
+- Rate limit rejections
+- Heartbeat timeouts
+- Connection errors
+
+### JSON log format
+
+For integration with SIEM or log aggregation tools, use `--log-format json`:
+
+```
+dbr host-daemon --log-format json --log-file /var/log/dbr.json
+```
+
+Each log line is a JSON object with `timestamp`, `level`, `target`, `message`, and structured fields.
+
+### Log levels
+
+| Level | What is logged |
+|-------|---------------|
+| `error` | Unrecoverable failures (bind errors, internal errors) |
+| `warn` | Rejected operations (rate limits, invalid URLs, oversized messages) |
+| `info` | Normal operations (register, forward, unforward, URL open, disconnect) |
+| `debug` | Connection-level details (accept, bridge, heartbeat) |
+| `trace` | Raw protocol messages (for debugging) |
+
+## Configuration Hardening
+
+The TOML config file parser (`~/.config/dbr/config.toml`) uses `deny_unknown_fields` to reject unrecognized field names. This prevents silent misconfiguration from typos — a field like `contrl_port` (misspelled) will cause an error instead of being silently ignored with the default value taking effect.
+
+## Supply Chain Security
+
+- **Static binaries:** Release binaries are statically linked (musl on Linux), with no runtime dependencies.
+- **SHA256 checksums:** Every release publishes checksums alongside the binaries for verification.
+- **No unsafe code:** The project targets zero `unsafe` blocks. All memory safety is enforced by the Rust compiler.
+- **Dependency auditing:** `cargo audit` and `cargo deny check` are run in CI to catch known vulnerabilities and license issues in dependencies.
+
+### Minimal dependency tree
+
+The project uses a focused set of well-maintained crates:
+
+| Crate | Purpose |
+|-------|---------|
+| `tokio` | Async runtime |
+| `serde` + `serde_json` | Protocol serialization |
+| `clap` | CLI parsing |
+| `tracing` + `tracing-subscriber` | Structured logging |
+| `thiserror` | Error types |
+| `uuid` | Connection ID generation |
+
+## Verification Commands
+
+### Verify loopback-only binding
+
+After starting the host daemon, confirm that all listeners are bound to loopback:
+
+**macOS:**
+```bash
+# Show all dbr listeners — all should be on 127.0.0.1 or ::1
+lsof -iTCP -sTCP:LISTEN -P -n | grep dbr
+```
+
+**Linux:**
+```bash
+# Show all listeners bound by the dbr process
+ss -tlnp | grep dbr
+```
+
+Expected output should show only `127.0.0.1:PORT` or `[::1]:PORT` addresses. If you see `0.0.0.0` or `*` or `[::]`, something is wrong.
+
+### Verify no Docker socket access
+
+```bash
+# Inside the container — should NOT be present
+ls -la /var/run/docker.sock
+# Expected: No such file or directory
+```
+
+### Verify no unsafe code
+
+```bash
+# From the project root
+cargo geiger
+# Or search manually:
+grep -r "unsafe" src/ --include="*.rs"
+```
+
+### Audit dependencies
+
+```bash
+cargo audit
+cargo deny check
+```
+
+### Verify message size enforcement
+
+```bash
+# Send an oversized message to the control port — should be rejected
+python3 -c "import socket; s=socket.socket(); s.connect(('127.0.0.1',19285)); s.send(b'x'*70000+b'\n'); print(s.recv(1024))"
+```
+
+The daemon should handle this gracefully without crashing or allocating excessive memory.
