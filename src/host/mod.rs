@@ -723,6 +723,7 @@ async fn handle_control_connection(
                 .lock()
                 .await
                 .open(&url)
+                .await
                 .inspect_err(|e| {
                     warn!(%addr, url, error = %e, "failed to open URL");
                 })
@@ -887,6 +888,7 @@ async fn dispatch_container_message(
                 .lock()
                 .await
                 .open(&url)
+                .await
                 .inspect_err(|e| {
                     warn!(container_id, url, error = %e, "failed to open URL");
                 })

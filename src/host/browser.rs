@@ -5,7 +5,6 @@
 //! the URL in the host's default browser.
 
 use std::collections::{HashMap, VecDeque};
-use std::process::Command;
 
 use tokio::time::Instant;
 
@@ -103,7 +102,7 @@ pub fn rewrite_url(url: &str, port_map: &HashMap<u16, u16>) -> String {
 /// If `browser_cmd` is `Some`, uses that command. Otherwise uses `open` on
 /// macOS and `xdg-open` on Linux. The URL is passed as a single argument
 /// (not via shell) to prevent command injection.
-fn open_in_browser(url: &str, browser_cmd: Option<&str>) -> Result<(), BrowserError> {
+async fn open_in_browser(url: &str, browser_cmd: Option<&str>) -> Result<(), BrowserError> {
     let cmd = match browser_cmd {
         Some(c) => c,
         None => {
@@ -117,12 +116,13 @@ fn open_in_browser(url: &str, browser_cmd: Option<&str>) -> Result<(), BrowserEr
 
     debug!(cmd, url, "opening URL in browser");
 
-    let status = Command::new(cmd)
+    let status = tokio::process::Command::new(cmd)
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
+        .await
         .map_err(|e| BrowserError::OpenFailed(format!("{cmd}: {e}")))?;
 
     if status.success() {
@@ -189,7 +189,7 @@ impl BrowserOpener {
     ///
     /// Returns [`BrowserError`] if validation fails, the rate limit is exceeded,
     /// or the browser command fails.
-    pub fn open(&mut self, url: &str) -> Result<(), BrowserError> {
+    pub async fn open(&mut self, url: &str) -> Result<(), BrowserError> {
         validate_url(url)?;
 
         // Rate limiting: sliding window of 1 second.
@@ -218,7 +218,7 @@ impl BrowserOpener {
             );
         }
 
-        open_in_browser(&rewritten, self.browser_cmd.as_deref())?;
+        open_in_browser(&rewritten, self.browser_cmd.as_deref()).await?;
         info!(url = rewritten.as_str(), "opened URL in browser");
         Ok(())
     }
@@ -359,7 +359,7 @@ mod tests {
             opener.recent_opens.push_back(Instant::now());
         }
         // Next open should be rate limited
-        let result = opener.open("http://localhost:8080");
+        let result = opener.open("http://localhost:8080").await;
         assert!(matches!(result, Err(BrowserError::RateLimited)));
     }
 
@@ -373,7 +373,7 @@ mod tests {
         // Advance past the 1-second window
         tokio::time::advance(Duration::from_secs(2)).await;
         // Old entries should be pruned, allowing new opens
-        let result = opener.open("http://localhost:8080");
+        let result = opener.open("http://localhost:8080").await;
         assert!(result.is_ok());
     }
 
