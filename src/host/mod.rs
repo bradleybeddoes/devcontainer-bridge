@@ -622,11 +622,12 @@ async fn handle_control_connection(
                 return Ok(());
             }
 
-            // Enforce container limit
-            {
+            // Enforce container limit and detect re-registration in a
+            // single lock acquisition to avoid TOCTOU between the two checks.
+            let is_reregistration = {
                 let s = ctx.state.lock().await;
-                if s.containers.len() >= MAX_CONTAINERS && !s.containers.contains_key(&container_id)
-                {
+                let already_registered = s.containers.contains_key(&container_id);
+                if s.containers.len() >= MAX_CONTAINERS && !already_registered {
                     warn!(
                         %addr, container_id,
                         max = MAX_CONTAINERS,
@@ -635,17 +636,14 @@ async fn handle_control_connection(
                     conn.send(&Message::RegisterAck { success: false }).await?;
                     return Ok(());
                 }
-            }
+                already_registered
+            };
 
             // Clean up stale state if this container_id is already registered
             // (e.g. reconnect after network disruption before heartbeat timeout)
-            {
-                let s = ctx.state.lock().await;
-                if s.containers.contains_key(&container_id) {
-                    warn!(%addr, container_id, "re-registration, cleaning up old state");
-                    drop(s);
-                    cleanup_container(&container_id, &ctx.state).await;
-                }
+            if is_reregistration {
+                warn!(%addr, container_id, "re-registration, cleaning up old state");
+                cleanup_container(&container_id, &ctx.state).await;
             }
 
             info!(
