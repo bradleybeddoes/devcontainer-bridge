@@ -229,8 +229,11 @@ See [docs/security.md](docs/security.md) for the full threat model and security 
 # Build
 cargo build --release
 
-# Run tests
+# Run unit + integration tests
 cargo test
+
+# Run end-to-end tests (self-contained, no external devcontainers needed)
+scripts/dev-test.sh
 
 # Lint
 cargo clippy -- -D warnings

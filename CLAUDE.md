@@ -80,6 +80,9 @@ tests/
   integration/
     main.rs             Test harness entry
     forwarding.rs       13 integration tests: register/forward/unforward lifecycle, cleanup on disconnect, Ping/Pong, ListRequest/ListResponse, multi-container port conflict, full reverse proxy pipeline, data handshake, reconnection, ConnectFailed handling, bridge timeout
+  e2e/
+    Dockerfile          Minimal Alpine 3.21 image (python3, bash) for self-contained e2e tests
+    docker-compose.yml  Compose definition (project: dbr-e2e, service: dbr-test-app) with host.docker.internal mapping
 ```
 
 ---
@@ -143,20 +146,20 @@ docker exec -d <container> dbr container-daemon
 
 ### End-to-end validation with `scripts/dev-test.sh`
 
-The automated test script handles the full build-deploy-test cycle:
+The automated test script is **fully self-contained** — it spins up its own
+minimal Alpine test container (`tests/e2e/`), runs all tests against it, and
+tears it down on exit. No external devcontainers are required or touched.
 
 ```bash
-# Full cycle: build both binaries, deploy, run all tests
+# Full cycle: build both binaries, deploy to test container, run all tests
 scripts/dev-test.sh
 
 # Skip builds (use existing binaries)
 scripts/dev-test.sh --skip-build
-
-# Target a specific container
-scripts/dev-test.sh --container myproject
 ```
 
 The script tests:
+- Test container lifecycle (compose up, health check, compose down)
 - Host daemon startup and control port binding
 - Container daemon registration
 - Automatic port detection and forwarding
@@ -250,6 +253,12 @@ These MUST be maintained in all changes:
 - Test ConnectFailed graceful handling
 - Test bridge timeout when no data connection arrives
 
+### E2E tests (`tests/e2e/` + `scripts/dev-test.sh`)
+- Self-contained: spins up a minimal Alpine container via `docker compose`, no external devcontainers needed
+- Container definition: `tests/e2e/Dockerfile` (Alpine 3.21 + python3 + bash) and `tests/e2e/docker-compose.yml` (project `dbr-e2e`, service `dbr-test-app`)
+- Tests the full pipeline: build → deploy → host daemon → container daemon registration → port scan detection → TCP forwarding + data transfer → browser URL opening → idempotency → cleanup
+- Container is torn down automatically via cleanup trap (`docker compose down`)
+
 ### Testing patterns
 - Use `find_free_port()` (bind to port 0, return assigned port) to avoid port conflicts between parallel tests
 - Use `tcp_pair()` helper for creating connected TCP stream pairs
@@ -270,13 +279,13 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-### 2. Run the automated E2E test (requires a running devcontainer)
+### 2. Run the automated E2E test
 
 ```bash
 scripts/dev-test.sh
 ```
 
-This builds both binaries, deploys to containers, and runs all end-to-end tests. It exits non-zero on any failure.
+This builds both binaries, starts a self-contained test container, deploys to it, and runs all end-to-end tests. The test container is torn down automatically on exit. No external devcontainers are required. It exits non-zero on any failure.
 
 ### 3. Build cycle details
 

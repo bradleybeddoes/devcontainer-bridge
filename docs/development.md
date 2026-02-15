@@ -10,9 +10,7 @@ everything a developer needs to contribute to the project.
 - **Rust toolchain** -- `rustup` with stable Rust 1.70+. Install from
   https://rustup.rs
 - **Docker Desktop** (macOS) or Docker Engine 20.10+ (Linux) -- required for
-  building the Linux binary and for running devcontainers to test against
-- **A running devcontainer** -- at least one devcontainer with an `app` service
-  for end-to-end testing
+  building the Linux binary and for the self-contained e2e test container
 
 Verify your setup:
 
@@ -124,30 +122,51 @@ docker exec -d "$CONTAINER" dbr container-daemon
 `scripts/dev-test.sh` automates the full build-deploy-test cycle. It is the
 primary validation tool for changes.
 
+The script is **fully self-contained** -- it spins up its own minimal Alpine
+test container from `tests/e2e/`, runs all tests against it, and tears it down
+on exit. No external devcontainers are required or touched.
+
+### Test container
+
+The test environment lives in `tests/e2e/`:
+
+- **`Dockerfile`** -- Alpine 3.21 with `python3` and `bash`. Stays alive with
+  `sleep infinity`. No Rust toolchain needed (the prebuilt binary is copied in).
+- **`docker-compose.yml`** -- Project name `dbr-e2e`, service `dbr-test-app`.
+  Adds `extra_hosts: ["host.docker.internal:host-gateway"]` for container-to-host
+  connectivity. Produces a container named `dbr-e2e-dbr-test-app-1`.
+
+The container is started at the beginning of each run and torn down by the
+cleanup trap, even on failure or `Ctrl-C`.
+
 ### What it does
 
 1. **Build phase** -- Builds the macOS host binary and the Linux container
    binary using the Docker approach
-2. **Deploy phase** -- Discovers running devcontainer app containers, kills
-   existing `dbr` processes, copies the new binary, and verifies it runs
-3. **Host daemon tests** -- Starts the host daemon, verifies the control port
+2. **Test container phase** -- Starts the self-contained test container via
+   `docker compose up -d --build`, waits for it to be running
+3. **Deploy phase** -- Copies the Linux binary into the test container,
+   verifies it runs
+4. **Pre-flight** -- Verifies the test container can reach the host via
+   `host.docker.internal`
+5. **Host daemon tests** -- Starts the host daemon, verifies the control port
    is listening, checks `dbr status`
-4. **Container daemon tests** -- Starts the container daemon in each container,
-   verifies registration
-5. **Port forwarding tests** -- Starts a TCP listener in a container, waits for
-   port detection, verifies the port appears in status, tests data transfer
+6. **Container daemon tests** -- Starts the container daemon in the test
+   container, verifies registration
+7. **Port forwarding tests** -- Starts a TCP listener in the container, waits
+   for port detection, verifies the port appears in status, tests data transfer
    through the forwarded port, stops the listener, verifies the port disappears
-6. **Browser opening tests** -- Tests the `dbr open` command from inside a
-   container
-7. **Idempotency tests** -- Verifies `dbr ensure` can be called multiple times
-8. **Cleanup** -- Kills all daemons and reports pass/fail summary
+8. **Browser opening tests** -- Tests the `dbr open` command from inside the
+   container (valid and invalid URLs)
+9. **Idempotency tests** -- Verifies `dbr ensure` can be called multiple times
+10. **Cleanup** -- Kills all daemons, tears down the test container via
+   `docker compose down`, reports pass/fail summary
 
 ### Flags
 
 | Flag | Description |
 |------|-------------|
 | `--skip-build` | Skip the build phase (use existing binaries) |
-| `--container NAME` | Target a specific container (substring match) |
 | `--help` | Show usage |
 
 ### Example usage
@@ -158,9 +177,6 @@ scripts/dev-test.sh
 
 # After code changes, skip the first build to iterate faster
 scripts/dev-test.sh --skip-build
-
-# Target a specific project's container
-scripts/dev-test.sh --container myproject
 
 # Typical iteration loop:
 #   1. Edit source code
@@ -173,37 +189,64 @@ scripts/dev-test.sh --container myproject
 ### Example output
 
 ```
-=== Build Phase ===
+=== Build Phase (skipped) ===
 
-[INFO]  Building macOS host binary (cargo build --release)...
-[PASS]  Host binary built (12s)
-[INFO]  Building Linux container binary (Docker rust:alpine)...
-[PASS]  Linux binary built (45s)
+[SKIP]  Build skipped via --skip-build
+
+=== Test Container ===
+
+[INFO]  Starting test container...
+[PASS]  Test container is running
 
 === Deploy Phase ===
 
-[INFO]  Found 1 container(s):
-  - myproject_devcontainer-app-1
-[INFO]  Deploying to myproject_devcontainer-app-1...
-[PASS]  Deployed and verified in myproject_devcontainer-app-1
+[INFO]  Deploying to dbr-e2e-dbr-test-app-1...
+[PASS]  Deployed and verified in dbr-e2e-dbr-test-app-1
+
+=== Pre-flight: Container Connectivity ===
+
+[PASS]  Container dbr-e2e-dbr-test-app-1 has working outbound connectivity
 
 === Test Phase: Host Daemon ===
 
-[PASS]  dbr ensure succeeded
 [PASS]  Control port 19285 is listening
 [PASS]  dbr status works (host daemon responding)
+
+=== Test Phase: Container Daemons ===
+
+[PASS]  Container dbr-e2e-dbr-test-app-1 appears registered (status shows data)
 
 === Test Phase: Port Forwarding ===
 
 [PASS]  Port 18888 detected and appears in dbr status
+[PASS]  dbr status --json returns valid JSON with correct structure
 [PASS]  Data passed through forwarded port successfully
 [PASS]  Port 18888 removed from status after listener stopped
 
+=== Test Phase: Browser Opening (OpenUrl) ===
+
+[PASS]  dbr open https URL succeeded (exit 0, full OpenUrl->OpenUrlAck round-trip)
+[PASS]  dbr open http URL succeeded (exit 0, full OpenUrl->OpenUrlAck round-trip)
+[PASS]  dbr open correctly rejected ftp:// URL (exit 1)
+[PASS]  dbr open correctly rejected empty URL (exit 1)
+[PASS]  dbr open correctly rejected javascript: URL (exit 1)
+
+=== Test Phase: Idempotency ===
+
+[PASS]  dbr ensure detected running daemon ('already running')
+[PASS]  dbr status still works after ensure
+
+=== Cleanup ===
+
+[INFO]  Stopping container daemon in dbr-e2e-dbr-test-app-1
+[INFO]  Stopping host daemon
+[INFO]  Tearing down test container...
+
 === Test Summary ===
 
-  Passed:  10
+  Passed:  17
   Failed:  0
-  Skipped: 0
+  Skipped: 1
 
 RESULT: PASSED
 ```
