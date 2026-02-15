@@ -171,6 +171,11 @@ impl ConnectionTracker {
     }
 
     /// Record a proxy connection finishing; notifies drain waiters on zero.
+    ///
+    /// Uses `notify_waiters` instead of `notify_one` so a notification
+    /// is never lost between `wait_drained` loop iterations — two rapid
+    /// decrements could otherwise consume the single stored permit before
+    /// the waiter re-registers.
     fn decrement(&self) {
         let prev = self.count.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(
@@ -178,7 +183,7 @@ impl ConnectionTracker {
             "ConnectionTracker underflow: decrement without matching increment"
         );
         if prev == 1 {
-            self.drained.notify_one();
+            self.drained.notify_waiters();
         }
     }
 
