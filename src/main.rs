@@ -14,6 +14,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing::{error, info};
 
+use thiserror::Error;
+
 use dbr::config::Config;
 use dbr::config::DEFAULT_CONTROL_PORT;
 use dbr::container::browser;
@@ -22,6 +24,22 @@ use dbr::host::HostConfig;
 use dbr::protocol::{ForwardInfo, Message, Protocol};
 
 use cli::{Cli, Command};
+
+/// Errors from CLI subcommands that interact with the host daemon.
+#[derive(Debug, Error)]
+enum CliError {
+    /// Could not connect to or communicate with the host daemon.
+    #[error("{0}")]
+    Connection(String),
+
+    /// Control channel protocol error.
+    #[error(transparent)]
+    Control(#[from] ControlError),
+
+    /// JSON serialization error (status --json output).
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
 
 /// Create a tokio runtime, printing to stderr and returning `FAILURE` on error.
 fn build_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
@@ -225,8 +243,10 @@ async fn run_status(
     host: std::net::IpAddr,
     control_port: u16,
     json: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = connect_to_host(host, control_port).await?;
+) -> Result<(), CliError> {
+    let mut conn = connect_to_host(host, control_port)
+        .await
+        .map_err(CliError::Connection)?;
 
     conn.send(&Message::ListRequest).await?;
 
@@ -241,7 +261,9 @@ async fn run_status(
             }
             Ok(())
         }
-        other => Err(format!("unexpected response from host daemon: {other:?}").into()),
+        other => Err(CliError::Connection(format!(
+            "unexpected response from host daemon: {other:?}"
+        ))),
     }
 }
 
@@ -295,8 +317,10 @@ async fn run_forward(
     host: std::net::IpAddr,
     port: u16,
     control_port: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = connect_to_host(host, control_port).await?;
+) -> Result<(), CliError> {
+    let mut conn = connect_to_host(host, control_port)
+        .await
+        .map_err(CliError::Connection)?;
     register_cli_client(&mut conn).await?;
 
     conn.send(&Message::Forward {
@@ -316,10 +340,12 @@ async fn run_forward(
             println!("Forwarding port {port} → host port {host_port}");
             Ok(())
         }
-        Message::ForwardAck { success: false, .. } => {
-            Err(format!("host daemon failed to forward port {port}").into())
-        }
-        other => Err(format!("unexpected response: {other:?}").into()),
+        Message::ForwardAck { success: false, .. } => Err(CliError::Connection(format!(
+            "host daemon failed to forward port {port}"
+        ))),
+        other => Err(CliError::Connection(format!(
+            "unexpected response: {other:?}"
+        ))),
     }
 }
 
@@ -328,8 +354,10 @@ async fn run_unforward(
     host: std::net::IpAddr,
     port: u16,
     control_port: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = connect_to_host(host, control_port).await?;
+) -> Result<(), CliError> {
+    let mut conn = connect_to_host(host, control_port)
+        .await
+        .map_err(CliError::Connection)?;
     register_cli_client(&mut conn).await?;
 
     conn.send(&Message::Unforward { port }).await?;
