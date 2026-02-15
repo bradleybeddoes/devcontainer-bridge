@@ -375,7 +375,9 @@ pub async fn run(
             .await
         {
             warn!(error = %e, "failed to send Register, reconnecting");
-            backoff.escalate();
+            if backoff.wait_or_shutdown(&mut shutdown).await {
+                return Ok(());
+            }
             continue;
         }
 
@@ -386,17 +388,23 @@ pub async fn run(
             }
             Ok(Message::RegisterAck { success: false }) => {
                 error!("registration rejected by host");
-                backoff.escalate();
+                if backoff.wait_or_shutdown(&mut shutdown).await {
+                    return Ok(());
+                }
                 continue;
             }
             Ok(other) => {
                 warn!(?other, "unexpected message, expected RegisterAck");
-                backoff.escalate();
+                if backoff.wait_or_shutdown(&mut shutdown).await {
+                    return Ok(());
+                }
                 continue;
             }
             Err(e) => {
                 warn!(error = %e, "failed to receive RegisterAck");
-                backoff.escalate();
+                if backoff.wait_or_shutdown(&mut shutdown).await {
+                    return Ok(());
+                }
                 continue;
             }
         }
@@ -412,7 +420,9 @@ pub async fn run(
             );
             let re_forward_failed = re_forward_ports(&mut conn, &last_forwarded).await;
             if re_forward_failed {
-                backoff.escalate();
+                if backoff.wait_or_shutdown(&mut shutdown).await {
+                    return Ok(());
+                }
                 continue;
             }
         }
