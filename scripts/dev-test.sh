@@ -375,7 +375,7 @@ log_info "Starting host daemon with --browser-cmd /usr/bin/true..."
     --control-port "$CONTROL_PORT" \
     --data-port "$DATA_PORT" \
     --browser-cmd /usr/bin/true \
-    --no-exit-on-idle \
+    --exit-on-idle \
     --log-level debug \
     --log-file /tmp/dbr-host-test.log &
 CLEANUP_PIDS+=("$!")

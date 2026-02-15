@@ -70,9 +70,9 @@ pub enum Command {
         #[arg(long)]
         log_file: Option<String>,
 
-        /// Keep running after the last container disconnects.
+        /// Exit when the last container disconnects.
         #[arg(long)]
-        no_exit_on_idle: bool,
+        exit_on_idle: bool,
 
         /// Custom browser command for opening URLs (overrides `open`/`xdg-open`).
         ///

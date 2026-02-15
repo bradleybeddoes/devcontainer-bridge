@@ -86,7 +86,7 @@ fn main() -> ExitCode {
             log_level,
             log_format,
             log_file,
-            no_exit_on_idle,
+            exit_on_idle,
             browser_cmd,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
@@ -96,7 +96,7 @@ fn main() -> ExitCode {
                 data_port,
                 bind_addr,
                 no_docker_detect,
-                exit_on_idle: !no_exit_on_idle,
+                exit_on_idle,
                 browser_cmd,
                 ..HostConfig::default()
             };

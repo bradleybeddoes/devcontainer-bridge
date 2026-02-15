@@ -390,7 +390,7 @@ impl Default for HostConfig {
             data_port: 19286,
             bind_addr: None,
             no_docker_detect: false,
-            exit_on_idle: true,
+            exit_on_idle: false,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             browser_cmd: None,
         }
