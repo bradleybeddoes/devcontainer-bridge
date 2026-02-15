@@ -17,7 +17,6 @@ use tracing::{error, info};
 use thiserror::Error;
 
 use dbr::config::Config;
-use dbr::config::DEFAULT_CONTROL_PORT;
 use dbr::container::browser;
 use dbr::control::{self, ControlConnection, ControlError};
 use dbr::host::HostConfig;
@@ -429,7 +428,8 @@ fn run_dbr_open() -> ExitCode {
     };
 
     init_tracing("warn", "text", None);
-    run_async(browser::open_url(&url, DEFAULT_CONTROL_PORT))
+    let config = Config::from_env().unwrap_or_default();
+    run_async(browser::open_url(&url, config.control_port))
 }
 
 /// Initialize the tracing subscriber with the given log level, format, and optional file.
