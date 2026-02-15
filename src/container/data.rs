@@ -128,8 +128,15 @@ pub async fn handle_connect_request(
     debug!(%host_data_addr, %conn_id, "opening reverse data connection to host");
 
     let mut data_stream =
-        TcpStream::connect(host_data_addr)
+        tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, TcpStream::connect(host_data_addr))
             .await
+            .map_err(|_| DataError::HostConnect {
+                addr: host_data_addr,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "host data port connect timed out",
+                ),
+            })?
             .map_err(|e| DataError::HostConnect {
                 addr: host_data_addr,
                 source: e,
