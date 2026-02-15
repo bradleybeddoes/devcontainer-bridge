@@ -85,6 +85,10 @@ pub enum HostError {
         source: std::io::Error,
     },
 
+    /// Failed to register a signal handler.
+    #[error("failed to set up signal handler: {0}")]
+    SignalSetup(std::io::Error),
+
     /// Control channel error.
     #[error("control channel error: {0}")]
     Control(#[from] ControlError),
@@ -421,15 +425,24 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
     // Channel to signal daemon shutdown
     let (daemon_shutdown_tx, mut daemon_shutdown_rx) = mpsc::channel::<()>(1);
 
-    // Set up signal handlers
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|source| HostError::Bind {
-            role: "signal",
-            port: 0,
-            source,
-        })?;
+    // Set up SIGTERM handler (Unix only; the host daemon targets macOS/Linux)
+    #[cfg(unix)]
+    let mut sigterm = Some(
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(HostError::SignalSetup)?,
+    );
+    #[cfg(not(unix))]
+    let mut sigterm: Option<tokio::signal::unix::Signal> = None;
 
     loop {
+        // Create a future that resolves on SIGTERM (Unix) or never resolves.
+        let sigterm_fut = async {
+            match sigterm.as_mut() {
+                Some(s) => s.recv().await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             // Accept new control connections (containers or CLI clients)
             result = control_listener.accept() => {
@@ -496,7 +509,7 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
             }
 
             // SIGTERM
-            _ = sigterm.recv() => {
+            _ = sigterm_fut => {
                 info!("received SIGTERM, stopping host daemon");
                 break;
             }
