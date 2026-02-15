@@ -10,11 +10,18 @@
 //! [`ConnectReady`]: crate::protocol::Message::ConnectReady
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio::io::{copy_bidirectional, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
+
+/// Timeout for connecting to a local port inside the container.
+///
+/// Prevents indefinite blocking if the local service is hung or
+/// the port is in a half-open state.
+const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 use crate::control::ControlError;
 use crate::protocol::Message;
@@ -83,17 +90,38 @@ pub async fn handle_connect_request(
     debug!(port, %conn_id, "connecting to local port");
 
     let ipv4_addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let mut local_stream = match TcpStream::connect(ipv4_addr).await {
-        Ok(stream) => stream,
-        Err(ipv4_err) => {
+    let mut local_stream = match tokio::time::timeout(
+        LOCAL_CONNECT_TIMEOUT,
+        TcpStream::connect(ipv4_addr),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(ipv4_err)) => {
             debug!(port, %conn_id, error = %ipv4_err, "IPv4 connect failed, trying IPv6");
             let ipv6_addr: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
-            TcpStream::connect(ipv6_addr)
+            tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, TcpStream::connect(ipv6_addr))
                 .await
+                .map_err(|_| DataError::LocalConnect {
+                    port,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "IPv6 connect timed out",
+                    ),
+                })?
                 .map_err(|_| DataError::LocalConnect {
                     port,
                     source: ipv4_err,
                 })?
+        }
+        Err(_) => {
+            return Err(DataError::LocalConnect {
+                port,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "IPv4 connect timed out",
+                ),
+            });
         }
     };
 
