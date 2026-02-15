@@ -739,17 +739,11 @@ async fn handle_control_connection(
                 handle_container_messages(&mut conn, &container_id, reg_id, ctx, connect_req_rx)
                     .await;
 
-            // Clean up on disconnect — only if this registration still owns the
-            // state. A re-registration replaces the ContainerState with a new
-            // registration_id, so a stale disconnect must not remove it.
-            let should_cleanup = {
-                let s = ctx.state.lock().await;
-                s.containers
-                    .get(&container_id)
-                    .is_some_and(|c| c.registration_id == reg_id)
-            };
-            if should_cleanup {
-                cleanup_container(&container_id, &ctx.state, &ctx.browser).await;
+            // Clean up on disconnect — only if this registration still owns
+            // the state. cleanup_container verifies the registration_id
+            // atomically under the lock before removing, so a re-registration
+            // that slips in between cannot have its state destroyed.
+            if cleanup_container(&container_id, reg_id, &ctx.state, &ctx.browser).await {
                 info!(container_id, "container disconnected");
             } else {
                 info!(
@@ -1175,16 +1169,28 @@ async fn handle_unforward(container_id: &str, port: u16, state: &Mutex<HostState
 }
 
 /// Clean up all state for a disconnected container.
+///
+/// Returns `true` if cleanup was performed, `false` if the registration
+/// was superseded (a newer registration owns the state).
 async fn cleanup_container(
     container_id: &str,
+    expected_reg_id: u64,
     state: &Mutex<HostState>,
     browser: &Mutex<BrowserOpener>,
-) {
+) -> bool {
     let forwards = {
         let mut s = state.lock().await;
-        let Some(cstate) = s.containers.remove(container_id) else {
-            return;
-        };
+        // Verify this registration still owns the state before removing.
+        // A re-registration replaces the ContainerState with a new
+        // registration_id; removing it here would destroy the new state.
+        let dominated = s
+            .containers
+            .get(container_id)
+            .is_none_or(|c| c.registration_id != expected_reg_id);
+        if dominated {
+            return false;
+        }
+        let cstate = s.containers.remove(container_id).unwrap();
         cstate
             .forwards
             .into_iter()
@@ -1218,6 +1224,7 @@ async fn cleanup_container(
         });
     }
     while drain_set.join_next().await.is_some() {}
+    true
 }
 
 /// Drain all forwards across all containers during daemon shutdown.
