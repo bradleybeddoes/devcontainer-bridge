@@ -639,93 +639,11 @@ async fn handle_container_messages(
         tokio::select! {
             result = conn.recv() => {
                 let msg = result?;
-                match msg {
-                    Message::Forward {
-                        port,
-                        protocol: _,
-                        process_name,
-                        pid,
-                    } => {
-                        let result = handle_forward(
-                            container_id,
-                            port,
-                            process_name,
-                            pid,
-                            state,
-                            client_tx,
-                        )
-                        .await;
-                        match result {
-                            Ok(host_port) => {
-                                if host_port != port {
-                                    info!(
-                                        container_id,
-                                        container_port = port,
-                                        host_port,
-                                        "port conflict resolved, assigned alternative host port"
-                                    );
-                                } else {
-                                    info!(
-                                        container_id,
-                                        container_port = port,
-                                        host_port,
-                                        "port forwarded"
-                                    );
-                                }
-                                browser.lock().await.add_port_mapping(port, host_port);
-                                conn.send(&Message::ForwardAck {
-                                    port,
-                                    success: true,
-                                    host_port,
-                                })
-                                .await?;
-                            }
-                            Err(e) => {
-                                warn!(container_id, port, error = %e, "failed to forward port");
-                                conn.send(&Message::ForwardAck {
-                                    port,
-                                    success: false,
-                                    host_port: 0,
-                                })
-                                .await?;
-                            }
-                        }
-                    }
-
-                    Message::Unforward { port } => {
-                        handle_unforward(container_id, port, state).await;
-                        browser.lock().await.remove_port_mapping(port);
-                        info!(container_id, port, "port unforwarded");
-                    }
-
-                    Message::ConnectFailed { conn_id, error } => {
-                        if conn_id.len() > MAX_CONN_ID_LENGTH {
-                            warn!(container_id, "ignoring ConnectFailed with oversized conn_id");
-                        } else {
-                            warn!(container_id, conn_id, error, "container connect failed");
-                            proxy::cancel_pending(pending, &conn_id).await;
-                        }
-                    }
-
-                    Message::OpenUrl { url } => {
-                        let success = browser.lock().await.open(&url).inspect_err(|e| {
-                            warn!(container_id, url, error = %e, "failed to open URL");
-                        }).is_ok();
-                        conn.send(&Message::OpenUrlAck { success }).await?;
-                    }
-
-                    Message::Ping => {
-                        conn.send(&Message::Pong).await?;
-                    }
-
-                    Message::Pong => {
-                        debug!(container_id, "received pong, resetting heartbeat counter");
-                        missed_pongs = 0;
-                    }
-
-                    other => {
-                        debug!(container_id, message = ?other, "ignoring unexpected message");
-                    }
+                let was_pong = dispatch_container_message(
+                    msg, conn, container_id, state, pending, browser, client_tx,
+                ).await?;
+                if was_pong {
+                    missed_pongs = 0;
                 }
             }
 
@@ -757,6 +675,109 @@ async fn handle_container_messages(
                     return Err(e);
                 }
             }
+        }
+    }
+}
+
+/// Dispatch a single message from a registered container.
+///
+/// Returns `Ok(true)` if the message was a `Pong` (caller resets heartbeat),
+/// `Ok(false)` for all other handled messages.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_container_message(
+    msg: Message,
+    conn: &mut ControlConnection,
+    container_id: &str,
+    state: &Arc<Mutex<HostState>>,
+    pending: &PendingConnections,
+    browser: &Arc<Mutex<BrowserOpener>>,
+    client_tx: &mpsc::Sender<ClientConnection>,
+) -> Result<bool, ControlError> {
+    match msg {
+        Message::Forward {
+            port,
+            protocol: _,
+            process_name,
+            pid,
+        } => {
+            let result =
+                handle_forward(container_id, port, process_name, pid, state, client_tx).await;
+            match result {
+                Ok(host_port) => {
+                    if host_port != port {
+                        info!(
+                            container_id,
+                            container_port = port,
+                            host_port,
+                            "port conflict resolved, assigned alternative host port"
+                        );
+                    } else {
+                        info!(container_id, container_port = port, host_port, "port forwarded");
+                    }
+                    browser.lock().await.add_port_mapping(port, host_port);
+                    conn.send(&Message::ForwardAck {
+                        port,
+                        success: true,
+                        host_port,
+                    })
+                    .await?;
+                }
+                Err(e) => {
+                    warn!(container_id, port, error = %e, "failed to forward port");
+                    conn.send(&Message::ForwardAck {
+                        port,
+                        success: false,
+                        host_port: 0,
+                    })
+                    .await?;
+                }
+            }
+            Ok(false)
+        }
+
+        Message::Unforward { port } => {
+            handle_unforward(container_id, port, state).await;
+            browser.lock().await.remove_port_mapping(port);
+            info!(container_id, port, "port unforwarded");
+            Ok(false)
+        }
+
+        Message::ConnectFailed { conn_id, error } => {
+            if conn_id.len() > MAX_CONN_ID_LENGTH {
+                warn!(container_id, "ignoring ConnectFailed with oversized conn_id");
+            } else {
+                warn!(container_id, conn_id, error, "container connect failed");
+                proxy::cancel_pending(pending, &conn_id).await;
+            }
+            Ok(false)
+        }
+
+        Message::OpenUrl { url } => {
+            let success = browser
+                .lock()
+                .await
+                .open(&url)
+                .inspect_err(|e| {
+                    warn!(container_id, url, error = %e, "failed to open URL");
+                })
+                .is_ok();
+            conn.send(&Message::OpenUrlAck { success }).await?;
+            Ok(false)
+        }
+
+        Message::Ping => {
+            conn.send(&Message::Pong).await?;
+            Ok(false)
+        }
+
+        Message::Pong => {
+            debug!(container_id, "received pong, resetting heartbeat counter");
+            Ok(true)
+        }
+
+        other => {
+            debug!(container_id, message = ?other, "ignoring unexpected message");
+            Ok(false)
         }
     }
 }
