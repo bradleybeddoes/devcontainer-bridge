@@ -77,13 +77,25 @@ pub async fn handle_connect_request(
     conn_id: String,
     host_data_addr: SocketAddr,
 ) -> Result<(), DataError> {
-    // Step 1: Connect to the local port inside the container
-    let local_addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    // Step 1: Connect to the local port inside the container.
+    // Try IPv4 (127.0.0.1) first, then fall back to IPv6 ([::1]) since the
+    // listening process may have bound to either address family.
     debug!(port, %conn_id, "connecting to local port");
 
-    let mut local_stream = TcpStream::connect(local_addr)
-        .await
-        .map_err(|e| DataError::LocalConnect { port, source: e })?;
+    let ipv4_addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut local_stream = match TcpStream::connect(ipv4_addr).await {
+        Ok(stream) => stream,
+        Err(ipv4_err) => {
+            debug!(port, %conn_id, error = %ipv4_err, "IPv4 connect failed, trying IPv6");
+            let ipv6_addr: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
+            TcpStream::connect(ipv6_addr)
+                .await
+                .map_err(|_| DataError::LocalConnect {
+                    port,
+                    source: ipv4_err,
+                })?
+        }
+    };
 
     // Step 2: Open reverse data connection to the host
     debug!(%host_data_addr, %conn_id, "opening reverse data connection to host");
