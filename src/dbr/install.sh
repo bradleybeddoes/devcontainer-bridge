@@ -114,21 +114,6 @@ fi
 WRAPPER_EOF
 chmod +x "${INSTALL_DIR}/dbr-start-daemon"
 
-# ---------------------------------------------------------------------------
-# Auto-start on interactive shell login (covers docker compose restart)
-# ---------------------------------------------------------------------------
-# postStartCommand only fires via `devcontainer up`. When the container is
-# restarted via `docker compose restart`, lifecycle hooks don't run. This
-# profile.d script ensures the daemon starts on the first interactive shell.
-echo "Installing /etc/profile.d/dbr.sh for shell-login auto-start..."
-cat > /etc/profile.d/dbr.sh << 'PROFILE_EOF'
-# Start the dbr container daemon if not already running.
-# Idempotent — safe to source on every shell login.
-if command -v dbr-start-daemon >/dev/null 2>&1; then
-  dbr-start-daemon
-fi
-PROFILE_EOF
-
 echo "Done! dbr ${VERSION} installed to ${INSTALL_DIR}/dbr"
 echo "dbr-open hardlink created at ${INSTALL_DIR}/dbr-open"
 echo "dbr-start-daemon wrapper created at ${INSTALL_DIR}/dbr-start-daemon"

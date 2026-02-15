@@ -45,14 +45,8 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 ```
 
 This installs the `dbr` binary at `/usr/local/bin/dbr` and creates the
-`dbr-open` hardlink. The container daemon starts automatically via two
-mechanisms:
-
-- **`postStartCommand`** -- fires on `devcontainer up`
-- **`/etc/profile.d/dbr.sh`** -- fires on first interactive shell login
-  (covers `docker compose restart` scenarios)
-
-Both call the idempotent `dbr-start-daemon` wrapper, so running both is safe.
+`dbr-open` hardlink. The container daemon starts automatically via the
+feature's `postStartCommand`, which fires on every `devcontainer up`.
 
 ### 3. Start the host daemon
 
