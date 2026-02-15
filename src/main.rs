@@ -36,6 +36,10 @@ enum CliError {
     #[error(transparent)]
     Control(#[from] ControlError),
 
+    /// The host daemon rejected the CLI registration.
+    #[error("host daemon rejected registration")]
+    RegistrationRejected,
+
     /// JSON serialization error (status --json output).
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -222,7 +226,7 @@ async fn connect_to_host(
 }
 
 /// Register as a manual CLI client, returning an error on failure.
-async fn register_cli_client(conn: &mut ControlConnection) -> Result<(), ControlError> {
+async fn register_cli_client(conn: &mut ControlConnection) -> Result<(), CliError> {
     conn.send(&Message::Register {
         container_id: "cli-manual".to_string(),
         hostname: "cli".to_string(),
@@ -231,7 +235,7 @@ async fn register_cli_client(conn: &mut ControlConnection) -> Result<(), Control
 
     match conn.recv().await? {
         Message::RegisterAck { success: true } => Ok(()),
-        _ => Err(ControlError::ConnectionClosed),
+        _ => Err(CliError::RegistrationRejected),
     }
 }
 
