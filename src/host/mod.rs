@@ -173,10 +173,28 @@ pub struct HostConfig {
     pub control_port: u16,
     /// Data channel port (default: 19286).
     pub data_port: u16,
+    /// IP address to bind the control and data listeners to.
+    ///
+    /// When `None`, the bind address is resolved automatically via
+    /// [`resolve_bind_addr`]: if Docker is detected, binds to `0.0.0.0`;
+    /// otherwise binds to `127.0.0.1`.
+    ///
+    /// Forwarded per-port listeners always bind to loopback regardless of this
+    /// setting.
+    pub bind_addr: Option<std::net::IpAddr>,
+    /// Skip Docker auto-detection and default to `127.0.0.1`.
+    ///
+    /// Only relevant when `bind_addr` is `None`. When `true`, Docker detection
+    /// is skipped and the bind address defaults to loopback.
+    pub no_docker_detect: bool,
     /// Exit when the last container disconnects.
     pub exit_on_idle: bool,
     /// Timeout for draining active connections on forward teardown (default: 5s).
     pub drain_timeout: Duration,
+    /// Custom browser command to use instead of `open` (macOS) / `xdg-open` (Linux).
+    ///
+    /// Useful for testing (e.g. `/usr/bin/true`) or headless environments.
+    pub browser_cmd: Option<String>,
 }
 
 impl Default for HostConfig {
@@ -184,9 +202,66 @@ impl Default for HostConfig {
         Self {
             control_port: 19285,
             data_port: 19286,
+            bind_addr: None,
+            no_docker_detect: false,
             exit_on_idle: true,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
+            browser_cmd: None,
         }
+    }
+}
+
+/// Detect whether Docker is running by executing `docker info`.
+///
+/// Returns `true` if the `docker info` command exits successfully, indicating
+/// Docker (Desktop or Engine) is available and running.
+fn detect_docker() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resolve the effective bind address for the control and data listeners.
+///
+/// Resolution priority:
+/// 1. `config.bind_addr` explicitly set -> use that address
+/// 2. `config.no_docker_detect` set -> bind to `127.0.0.1`
+/// 3. Docker detected via `docker info` -> bind to `0.0.0.0`
+/// 4. No Docker detected -> bind to `127.0.0.1`
+fn resolve_bind_addr(config: &HostConfig) -> std::net::IpAddr {
+    if let Some(addr) = config.bind_addr {
+        info!("Using configured bind address {}", addr);
+        return addr;
+    }
+
+    if config.no_docker_detect {
+        let addr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        info!(
+            "No Docker detected, binding to {}. Use --bind-addr to override.",
+            addr
+        );
+        return addr;
+    }
+
+    if detect_docker() {
+        let addr = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+        info!(
+            "Docker detected, binding control/data ports to {} for container connectivity. \
+             Use --bind-addr 127.0.0.1 or --no-docker-detect to restrict.",
+            addr
+        );
+        addr
+    } else {
+        let addr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        info!(
+            "No Docker detected, binding to {}. Use --bind-addr to override.",
+            addr
+        );
+        addr
     }
 }
 
@@ -212,23 +287,25 @@ fn timestamp_now() -> String {
 ///
 /// Returns [`HostError`] if the daemon cannot start (e.g. port bind failure).
 pub async fn run(config: HostConfig) -> Result<(), HostError> {
-    let control_listener =
-        ControlListener::bind(config.control_port)
-            .await
-            .map_err(|e| match e {
-                ControlError::Io(source) => HostError::Bind {
-                    role: "control",
-                    port: config.control_port,
-                    source,
-                },
-                other => HostError::Control(other),
-            })?;
+    let bind_addr = resolve_bind_addr(&config);
+
+    let control_listener = ControlListener::bind(bind_addr, config.control_port)
+        .await
+        .map_err(|e| match e {
+            ControlError::Io(source) => HostError::Bind {
+                role: "control",
+                port: config.control_port,
+                source,
+            },
+            other => HostError::Control(other),
+        })?;
     info!(
         port = config.control_port,
-        "control listener bound on 127.0.0.1"
+        bind_addr = %bind_addr,
+        "control listener bound"
     );
 
-    let data_addr: SocketAddr = ([127, 0, 0, 1], config.data_port).into();
+    let data_addr: SocketAddr = (bind_addr, config.data_port).into();
     let data_listener = TcpListener::bind(data_addr)
         .await
         .map_err(|source| HostError::Bind {
@@ -236,11 +313,15 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
             port: config.data_port,
             source,
         })?;
-    info!(port = config.data_port, "data listener bound on 127.0.0.1");
+    info!(
+        port = config.data_port,
+        bind_addr = %bind_addr,
+        "data listener bound"
+    );
 
     let state = Arc::new(Mutex::new(HostState::new()));
     let pending = new_pending_connections();
-    let browser = Arc::new(Mutex::new(BrowserOpener::new()));
+    let browser = Arc::new(Mutex::new(BrowserOpener::with_cmd(config.browser_cmd.clone())));
     let drain_timeout = config.drain_timeout;
 
     // Channel for client connections from all port listeners

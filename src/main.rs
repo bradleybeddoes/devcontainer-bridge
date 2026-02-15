@@ -58,19 +58,25 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::HostDaemon {
+            bind_addr,
+            no_docker_detect,
             control_port,
             data_port,
             log_level,
             log_format,
             log_file,
             no_exit_on_idle,
+            browser_cmd,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
 
             let config = HostConfig {
                 control_port,
                 data_port,
+                bind_addr,
+                no_docker_detect,
                 exit_on_idle: !no_exit_on_idle,
+                browser_cmd,
                 ..HostConfig::default()
             };
 
@@ -144,38 +150,54 @@ fn main() -> ExitCode {
             run_async(browser::open_url(&url, control_port))
         }
 
-        Command::Status { control_port, json } => {
+        Command::Status {
+            control_port,
+            host,
+            json,
+        } => {
             init_tracing("warn", "text", None);
-            run_async(run_status(control_port, json))
+            run_async(run_status(host, control_port, json))
         }
 
-        Command::Forward { port, control_port } => {
+        Command::Forward {
+            port,
+            control_port,
+            host,
+        } => {
             init_tracing("warn", "text", None);
-            run_async(run_forward(port, control_port))
+            run_async(run_forward(host, port, control_port))
         }
 
-        Command::Unforward { port, control_port } => {
+        Command::Unforward {
+            port,
+            control_port,
+            host,
+        } => {
             init_tracing("warn", "text", None);
-            run_async(run_unforward(port, control_port))
+            run_async(run_unforward(host, port, control_port))
         }
 
         Command::Ensure {
             control_port,
             data_port,
+            host,
         } => {
             init_tracing("warn", "text", None);
-            run_async(dbr::host::ensure::run_ensure(control_port, data_port))
+            run_async(dbr::host::ensure::run_ensure(host, control_port, data_port))
         }
     }
 }
 
 /// Connect to the host daemon control port, returning a connection or
 /// a user-facing error message.
-async fn connect_to_host(control_port: u16) -> Result<ControlConnection, String> {
-    let addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+async fn connect_to_host(
+    host: std::net::IpAddr,
+    control_port: u16,
+) -> Result<ControlConnection, String> {
+    let addr: SocketAddr = (host, control_port).into();
     control::connect(addr).await.map_err(|_| {
         format!(
-            "could not connect to host daemon on port {control_port}. \
+            "could not connect to host daemon at {addr}. \
              Is it running? Try `dbr ensure` first."
         )
     })
@@ -199,8 +221,12 @@ async fn register_cli_client(conn: &mut ControlConnection) -> Result<(), Control
 ///
 /// If `json` is true, outputs the response as JSON. Otherwise, displays a
 /// human-readable table.
-async fn run_status(control_port: u16, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = connect_to_host(control_port).await?;
+async fn run_status(
+    host: std::net::IpAddr,
+    control_port: u16,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = connect_to_host(host, control_port).await?;
 
     conn.send(&Message::ListRequest).await?;
 
@@ -265,8 +291,12 @@ fn format_since(since: &str) -> String {
 }
 
 /// Connect to the host daemon and send a manual `Forward` request.
-async fn run_forward(port: u16, control_port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = connect_to_host(control_port).await?;
+async fn run_forward(
+    host: std::net::IpAddr,
+    port: u16,
+    control_port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = connect_to_host(host, control_port).await?;
     register_cli_client(&mut conn).await?;
 
     conn.send(&Message::Forward {
@@ -294,8 +324,12 @@ async fn run_forward(port: u16, control_port: u16) -> Result<(), Box<dyn std::er
 }
 
 /// Connect to the host daemon and send a manual `Unforward` request.
-async fn run_unforward(port: u16, control_port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = connect_to_host(control_port).await?;
+async fn run_unforward(
+    host: std::net::IpAddr,
+    port: u16,
+    control_port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = connect_to_host(host, control_port).await?;
     register_cli_client(&mut conn).await?;
 
     conn.send(&Message::Unforward { port }).await?;

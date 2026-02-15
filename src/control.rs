@@ -120,20 +120,26 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// A TCP listener for the control channel, bound to a loopback address.
+/// A TCP listener for the control channel.
 pub struct ControlListener {
     listener: TcpListener,
 }
 
 impl ControlListener {
-    /// Bind a control channel listener to `127.0.0.1:<port>`.
+    /// Bind a control channel listener to the given address and port.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` — The IP address to bind to (e.g., `0.0.0.0` for all interfaces,
+    ///   `127.0.0.1` for loopback only).
+    /// * `port` — The TCP port to bind to.
     ///
     /// # Errors
     ///
     /// Returns [`ControlError::Io`] if the bind fails (e.g. port in use).
-    pub async fn bind(port: u16) -> Result<Self, ControlError> {
-        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-        let listener = TcpListener::bind(addr).await?;
+    pub async fn bind(addr: std::net::IpAddr, port: u16) -> Result<Self, ControlError> {
+        let sock_addr: SocketAddr = (addr, port).into();
+        let listener = TcpListener::bind(sock_addr).await?;
         Ok(Self { listener })
     }
 
@@ -279,7 +285,9 @@ mod tests {
 
     #[tokio::test]
     async fn listener_and_client_roundtrip() {
-        let listener = ControlListener::bind(0).await.unwrap();
+        let listener = ControlListener::bind(std::net::Ipv4Addr::LOCALHOST.into(), 0)
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
@@ -300,7 +308,9 @@ mod tests {
 
     #[tokio::test]
     async fn connection_closed_on_drop() {
-        let listener = ControlListener::bind(0).await.unwrap();
+        let listener = ControlListener::bind(std::net::Ipv4Addr::LOCALHOST.into(), 0)
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = tokio::spawn(async move {

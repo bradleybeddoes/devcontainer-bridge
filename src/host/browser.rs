@@ -128,15 +128,21 @@ pub fn rewrite_url(url: &str, port_map: &HashMap<u16, u16>) -> String {
     url.to_string()
 }
 
-/// Opens a URL in the host's default browser.
+/// Opens a URL in the host's default browser (or a custom command).
 ///
-/// Uses `open` on macOS and `xdg-open` on Linux. The URL is passed as a
-/// single argument (not via shell) to prevent command injection.
-fn open_in_browser(url: &str) -> Result<(), BrowserError> {
-    let cmd = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
+/// If `browser_cmd` is `Some`, uses that command. Otherwise uses `open` on
+/// macOS and `xdg-open` on Linux. The URL is passed as a single argument
+/// (not via shell) to prevent command injection.
+fn open_in_browser(url: &str, browser_cmd: Option<&str>) -> Result<(), BrowserError> {
+    let cmd = match browser_cmd {
+        Some(c) => c,
+        None => {
+            if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            }
+        }
     };
 
     debug!(cmd, url, "opening URL in browser");
@@ -160,20 +166,40 @@ fn open_in_browser(url: &str) -> Result<(), BrowserError> {
 }
 
 /// Manages browser opening with URL validation, port rewriting, and rate limiting.
-#[derive(Default)]
 pub struct BrowserOpener {
     /// Maps container port → host port for URL rewriting.
     port_map: HashMap<u16, u16>,
     /// Timestamps of recent opens for rate limiting (sliding window).
     recent_opens: Vec<Instant>,
+    /// Custom browser command (overrides platform default).
+    browser_cmd: Option<String>,
+}
+
+impl Default for BrowserOpener {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BrowserOpener {
-    /// Create a new `BrowserOpener` with an empty port map.
+    /// Create a new `BrowserOpener` with an empty port map and platform-default browser.
     pub fn new() -> Self {
         Self {
             port_map: HashMap::new(),
             recent_opens: Vec::new(),
+            browser_cmd: None,
+        }
+    }
+
+    /// Create a new `BrowserOpener` with an optional custom browser command.
+    ///
+    /// If `cmd` is `Some`, that command is used instead of `open` (macOS) /
+    /// `xdg-open` (Linux). Useful for testing or headless environments.
+    pub fn with_cmd(cmd: Option<String>) -> Self {
+        Self {
+            port_map: HashMap::new(),
+            recent_opens: Vec::new(),
+            browser_cmd: cmd,
         }
     }
 
@@ -215,7 +241,7 @@ impl BrowserOpener {
             );
         }
 
-        open_in_browser(&rewritten)?;
+        open_in_browser(&rewritten, self.browser_cmd.as_deref())?;
         info!(url = rewritten.as_str(), "opened URL in browser");
         Ok(())
     }

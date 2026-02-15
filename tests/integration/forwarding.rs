@@ -4,7 +4,7 @@
 //! requiring Docker. They exercise the real control channel, listener
 //! management, data connection handshake, and bidirectional proxy bridge.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -119,6 +119,7 @@ async fn test_register_forward_unforward_lifecycle() {
         control_port,
         data_port,
         exit_on_idle: true,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -199,6 +200,7 @@ async fn test_cleanup_on_container_disconnect() {
         control_port,
         data_port,
         exit_on_idle: true,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -266,6 +268,7 @@ async fn test_ping_pong() {
         control_port,
         data_port,
         exit_on_idle: true,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -299,6 +302,7 @@ async fn test_list_request_response() {
         control_port,
         data_port,
         exit_on_idle: false,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -371,6 +375,7 @@ async fn test_multi_container_port_conflict() {
         control_port,
         data_port,
         exit_on_idle: false,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -557,6 +562,7 @@ async fn test_data_connection_handshake_on_host() {
         control_port,
         data_port,
         exit_on_idle: false,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -602,6 +608,7 @@ async fn test_multiple_forwards_same_container() {
         control_port,
         data_port,
         exit_on_idle: true,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -707,6 +714,7 @@ async fn test_standalone_ping() {
         control_port,
         data_port,
         exit_on_idle: false,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -744,6 +752,7 @@ async fn test_container_reconnect_reregister() {
         control_port,
         data_port,
         exit_on_idle: false,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -821,6 +830,7 @@ async fn test_connect_failed_handling() {
         control_port,
         data_port,
         exit_on_idle: false,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 
@@ -876,6 +886,7 @@ async fn test_host_data_port_accepts_connect_ready() {
         control_port,
         data_port,
         exit_on_idle: false,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
         ..HostConfig::default()
     };
 

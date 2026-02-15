@@ -4,7 +4,7 @@
 //! if not. Used by shell aliases like `dcup` to guarantee the host daemon
 //! is available before launching a devcontainer.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -55,7 +55,7 @@ pub enum EnsureError {
 
 /// Run the `ensure` subcommand: start the host daemon if not already running.
 ///
-/// 1. Try connecting to `127.0.0.1:control_port`
+/// 1. Try connecting to `host:control_port`
 /// 2. If connection succeeds → send `Ping`, verify `Pong`, exit OK
 /// 3. If connection refused → spawn host daemon as background process,
 ///    wait for port to become available, exit OK
@@ -65,8 +65,8 @@ pub enum EnsureError {
 /// # Errors
 ///
 /// Returns [`EnsureError`] if the daemon cannot be started or verified.
-pub async fn run_ensure(control_port: u16, data_port: u16) -> Result<(), EnsureError> {
-    let addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+pub async fn run_ensure(host: IpAddr, control_port: u16, data_port: u16) -> Result<(), EnsureError> {
+    let addr: SocketAddr = (host, control_port).into();
 
     // Step 1: Try connecting
     if let Ok(mut conn) = control::connect(addr).await {

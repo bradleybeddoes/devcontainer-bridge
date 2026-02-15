@@ -4,6 +4,8 @@
 
 use clap::{Parser, Subcommand};
 
+use std::net::IpAddr;
+
 use dbr::config::{
     DEFAULT_CONTROL_PORT, DEFAULT_DATA_PORT, DEFAULT_LOG_FORMAT, DEFAULT_LOG_LEVEL,
     DEFAULT_SCAN_INTERVAL_MS,
@@ -22,9 +24,32 @@ pub struct Cli {
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run the host-side daemon (binds control + data ports on loopback).
+    /// Run the host-side daemon (binds control + data ports).
+    ///
+    /// By default, the bind address is auto-detected: if Docker is running,
+    /// control and data ports bind to 0.0.0.0 (all interfaces) so containers
+    /// can reach the host via Docker Desktop's gateway IP. If Docker is not
+    /// detected, they bind to 127.0.0.1 (loopback only).
+    /// Forwarded per-port listeners always bind to loopback only.
+    /// Use --bind-addr to set an explicit address, or --no-docker-detect
+    /// to skip detection and default to 127.0.0.1.
     #[command(name = "host-daemon")]
     HostDaemon {
+        /// IP address to bind control and data listeners to.
+        ///
+        /// When omitted, the bind address is auto-detected based on whether
+        /// Docker is running (0.0.0.0 if Docker detected, 127.0.0.1 otherwise).
+        /// Forwarded per-port listeners always bind to loopback regardless.
+        #[arg(long)]
+        bind_addr: Option<IpAddr>,
+
+        /// Skip Docker detection and bind to 127.0.0.1.
+        ///
+        /// When set, disables the automatic Docker detection that would bind
+        /// to 0.0.0.0. Ignored if --bind-addr is explicitly provided.
+        #[arg(long)]
+        no_docker_detect: bool,
+
         /// Control channel port.
         #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
         control_port: u16,
@@ -48,6 +73,13 @@ pub enum Command {
         /// Keep running after the last container disconnects.
         #[arg(long)]
         no_exit_on_idle: bool,
+
+        /// Custom browser command for opening URLs (overrides `open`/`xdg-open`).
+        ///
+        /// Useful for headless environments or testing. Set to `/usr/bin/true` to
+        /// accept all OpenUrl requests without actually opening a browser.
+        #[arg(long)]
+        browser_cmd: Option<String>,
     },
 
     /// Run the container-side daemon (inside a devcontainer).
@@ -81,9 +113,16 @@ pub enum Command {
     /// Show active port forwards across all containers.
     #[command(name = "status")]
     Status {
-        /// Host daemon address (host:port).
+        /// Host daemon control port.
         #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
         control_port: u16,
+
+        /// Host daemon IP address.
+        ///
+        /// Defaults to 127.0.0.1. Change this if the host daemon was started
+        /// with `--bind-addr` set to a non-loopback address.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: IpAddr,
 
         /// Output as JSON.
         #[arg(long)]
@@ -99,6 +138,13 @@ pub enum Command {
         /// Host daemon control port.
         #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
         control_port: u16,
+
+        /// Host daemon IP address.
+        ///
+        /// Defaults to 127.0.0.1. Change this if the host daemon was started
+        /// with `--bind-addr` set to a non-loopback address.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: IpAddr,
     },
 
     /// Manually remove a port forward.
@@ -110,6 +156,13 @@ pub enum Command {
         /// Host daemon control port.
         #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
         control_port: u16,
+
+        /// Host daemon IP address.
+        ///
+        /// Defaults to 127.0.0.1. Change this if the host daemon was started
+        /// with `--bind-addr` set to a non-loopback address.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: IpAddr,
     },
 
     /// Open a URL in the host browser via the host daemon.
@@ -156,5 +209,12 @@ BROWSER INTEGRATION:
         /// Data channel port.
         #[arg(long, default_value_t = DEFAULT_DATA_PORT)]
         data_port: u16,
+
+        /// Host daemon IP address for health check.
+        ///
+        /// Defaults to 127.0.0.1. Change this if the host daemon was started
+        /// with `--bind-addr` set to a non-loopback address.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: IpAddr,
     },
 }
