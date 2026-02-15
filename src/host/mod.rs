@@ -218,6 +218,10 @@ impl HostState {
     }
 
     /// Find the next available host port starting from `preferred`.
+    ///
+    /// Returns `preferred` if it is free, otherwise scans upward
+    /// wrapping around the port space. Returns `0` if every port
+    /// is in use (the subsequent bind will fail cleanly).
     fn find_available_port(&self, preferred: u16) -> u16 {
         let mut port = preferred;
         while self.used_host_ports.contains_key(&port) {
@@ -226,8 +230,8 @@ impl HostState {
                 port = 1024;
             }
             if port == preferred {
-                // Wrapped all the way around — unlikely but defensive
-                break;
+                // Wrapped all the way around — no ports available
+                return 0;
             }
         }
         port
