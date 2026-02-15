@@ -105,9 +105,12 @@ pub async fn handle_connect_request(
                             "IPv6 connect timed out",
                         ),
                     })?
-                    .map_err(|_| DataError::LocalConnect {
+                    .map_err(|ipv6_err| DataError::LocalConnect {
                         port,
-                        source: ipv4_err,
+                        source: std::io::Error::new(
+                            ipv4_err.kind(),
+                            format!("IPv4: {ipv4_err}, IPv6: {ipv6_err}"),
+                        ),
                     })?
             }
             Err(_) => {
@@ -164,23 +167,31 @@ pub async fn handle_connect_request(
 
 /// Spawn a tokio task to handle a [`Message::ConnectRequest`].
 ///
-/// On failure, the returned error string can be sent as a `ConnectFailed`
-/// message on the control channel.
+/// On failure, sends a [`Message::ConnectFailed`] through `fail_tx` so
+/// the session loop can relay it to the host on the control channel.
 ///
 /// # Arguments
 ///
 /// * `port` — The container-local port to connect to.
 /// * `conn_id` — The unique connection identifier.
 /// * `host_data_addr` — The host data channel address.
+/// * `fail_tx` — Channel to report failures back to the session loop.
 pub fn spawn_connect_handler(
     port: u16,
     conn_id: String,
     host_data_addr: SocketAddr,
+    fail_tx: tokio::sync::mpsc::Sender<Message>,
 ) -> tokio::task::JoinHandle<Result<(), DataError>> {
     tokio::spawn(async move {
         let result = handle_connect_request(port, conn_id.clone(), host_data_addr).await;
         if let Err(ref e) = result {
             error!(%conn_id, port, error = %e, "connect request failed");
+            let _ = fail_tx
+                .send(Message::ConnectFailed {
+                    conn_id: conn_id.clone(),
+                    error: e.to_string(),
+                })
+                .await;
         }
         result
     })

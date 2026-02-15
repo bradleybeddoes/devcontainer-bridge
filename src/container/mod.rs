@@ -431,6 +431,12 @@ pub async fn run(
 }
 
 /// Re-forward all previously tracked ports. Returns `true` if any send failed.
+///
+/// ForwardAck responses are not consumed here — they arrive asynchronously
+/// and are handled by `run_session`. A rejected re-forward is removed from
+/// the forwarded map on the next ack, then re-detected on the next scan
+/// cycle. This adds at most one scan interval of delay, which is acceptable
+/// for the reconnection path.
 async fn re_forward_ports(
     conn: &mut ControlConnection,
     forwarded: &HashMap<u16, ListeningPort>,
@@ -487,6 +493,10 @@ async fn run_session(
     // Track currently forwarded ports (initialized from previous session on reconnect)
     let mut forwarded = initial_forwarded;
     let mut scan_ticker = tokio::time::interval(params.scan_interval);
+
+    // Channel for connect handlers to report failures back to the session
+    // loop, which relays them as ConnectFailed on the control connection.
+    let (fail_tx, mut fail_rx) = tokio::sync::mpsc::channel::<Message>(64);
 
     loop {
         tokio::select! {
@@ -547,7 +557,7 @@ async fn run_session(
                 match msg_result {
                     Ok(Message::ConnectRequest { port, conn_id }) => {
                         info!(port, %conn_id, "received ConnectRequest");
-                        spawn_connect_handler(port, conn_id, params.data_addr);
+                        spawn_connect_handler(port, conn_id, params.data_addr, fail_tx.clone());
                     }
                     Ok(Message::Ping) => {
                         debug!("received Ping, sending Pong");
@@ -575,6 +585,14 @@ async fn run_session(
                         warn!(error = %e, "control channel error");
                         return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
                     }
+                }
+            }
+
+            // Relay ConnectFailed from connect handler tasks to the host
+            Some(fail_msg) = fail_rx.recv() => {
+                if let Err(e) = conn.send(&fail_msg).await {
+                    warn!(error = %e, "failed to send ConnectFailed");
+                    return (SessionOutcome::Error(ContainerError::Control(e)), forwarded);
                 }
             }
 
