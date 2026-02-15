@@ -12,6 +12,8 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use tracing::info;
 
+use crate::config::Config;
+use crate::container::resolve_host_addr;
 use crate::control::{self, ControlError};
 use crate::protocol::Message;
 
@@ -62,12 +64,17 @@ pub enum BrowserError {
     /// Received an unexpected message type instead of OpenUrlAck.
     #[error("unexpected response from host daemon: {0:?}")]
     UnexpectedResponse(Message),
+
+    /// Failed to resolve the host daemon address.
+    #[error("could not resolve host address: {0}")]
+    HostResolution(String),
 }
 
 /// Open a URL in the host browser by sending it to the host daemon.
 ///
-/// Validates the URL (scheme and length), connects to the host daemon's control
-/// port on `127.0.0.1`, sends [`Message::OpenUrl`], and waits for
+/// Validates the URL (scheme and length), resolves the host daemon address
+/// using the same chain as the container daemon (`host.docker.internal`,
+/// gateway IP, etc.), sends [`Message::OpenUrl`], and waits for
 /// [`Message::OpenUrlAck`].
 ///
 /// # Arguments
@@ -82,7 +89,13 @@ pub enum BrowserError {
 pub async fn open_url(url: &str, control_port: u16) -> Result<(), BrowserError> {
     validate_url(url)?;
 
-    let addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+    let config = Config::from_env().map_err(|e| BrowserError::HostResolution(e.to_string()))?;
+    let host = resolve_host_addr(&config)
+        .await
+        .map_err(|e| BrowserError::HostResolution(e.to_string()))?;
+    let addr: SocketAddr = format!("{host}:{control_port}")
+        .parse()
+        .map_err(|e: std::net::AddrParseError| BrowserError::HostResolution(e.to_string()))?;
     let mut conn = control::connect(addr)
         .await
         .map_err(|e| BrowserError::Connect { addr, source: e })?;
@@ -224,9 +237,16 @@ mod tests {
 
     #[tokio::test]
     async fn open_url_connection_refused() {
-        // Use port 0 — nothing should be listening on a random ephemeral port
-        // Actually use a high port unlikely to be in use
+        // Use a high port unlikely to be in use. Depending on the environment,
+        // this may fail with Connect (host resolved but port closed) or
+        // HostResolution (host.docker.internal not available).
         let result = open_url("https://example.com", 19199).await;
-        assert!(matches!(result, Err(BrowserError::Connect { .. })));
+        assert!(
+            matches!(
+                result,
+                Err(BrowserError::Connect { .. }) | Err(BrowserError::HostResolution(_))
+            ),
+            "expected Connect or HostResolution error, got {result:?}"
+        );
     }
 }
