@@ -591,3 +591,32 @@ async fn run_session(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[tokio::test]
+    async fn resolve_host_addr_returns_explicit_config() {
+        let mut config = Config::default();
+        config.host_addr = Some("10.0.0.1".to_string());
+        let result = resolve_host_addr(&config).await.unwrap();
+        assert_eq!(result, "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn resolve_host_addr_skips_fallbacks_with_explicit() {
+        // Even with an unusual address, the explicit path returns it directly
+        let mut config = Config::default();
+        config.host_addr = Some("192.168.99.99".to_string());
+        let result = resolve_host_addr(&config).await.unwrap();
+        assert_eq!(result, "192.168.99.99");
+    }
+
+    #[test]
+    fn get_container_id_returns_non_empty() {
+        let id = get_container_id();
+        assert!(!id.is_empty(), "container ID should never be empty");
+    }
+}
