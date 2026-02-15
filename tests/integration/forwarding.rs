@@ -106,6 +106,21 @@ async fn can_connect_port(port: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// Poll until a port stops accepting connections, returning true if it closed
+/// within the timeout. Avoids fixed-sleep assertions that are timing-dependent.
+async fn wait_port_closed(port: u16, timeout: Duration) -> bool {
+    let start = tokio::time::Instant::now();
+    loop {
+        if !can_connect_port(port).await {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: Register → Forward → ForwardAck → Unforward lifecycle
 // ---------------------------------------------------------------------------
@@ -168,12 +183,9 @@ async fn test_register_forward_unforward_lifecycle() {
         .await
         .unwrap();
 
-    // Give the listener time to shut down
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Verify the listener stopped
+    // Wait for the listener to shut down
     assert!(
-        !can_connect_port(host_port).await,
+        wait_port_closed(host_port, Duration::from_secs(5)).await,
         "forwarded port {host_port} should no longer be accepting connections"
     );
 
@@ -239,12 +251,9 @@ async fn test_cleanup_on_container_disconnect() {
     // Simulate container disconnect (drop control connection)
     drop(conn);
 
-    // Give cleanup time
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Verify forwarded port is torn down
+    // Wait for forwarded port to be torn down
     assert!(
-        !can_connect_port(host_port).await,
+        wait_port_closed(host_port, Duration::from_secs(5)).await,
         "forwarded port should be torn down after container disconnect"
     );
 
@@ -690,22 +699,19 @@ async fn test_multiple_forwards_same_container() {
         }
     }
 
-    // Give the OS a moment to release the ports after listener drop.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for unforwarded ports to close
+    for hp in &host_ports[..2] {
+        assert!(
+            wait_port_closed(*hp, Duration::from_secs(5)).await,
+            "unforwarded port {hp} should not accept connections"
+        );
+    }
 
     // Last two should still be up
     for hp in &host_ports[2..] {
         assert!(
             can_connect_port(*hp).await,
             "still-forwarded port {hp} should accept connections"
-        );
-    }
-
-    // First two should be down
-    for hp in &host_ports[..2] {
-        assert!(
-            !can_connect_port(*hp).await,
-            "unforwarded port {hp} should not accept connections"
         );
     }
 
