@@ -685,7 +685,7 @@ async fn handle_control_connection(
                 let s = ctx.state.lock().await;
                 s.containers
                     .get(&container_id)
-                    .map_or(false, |c| c.registration_id == reg_id)
+                    .is_some_and(|c| c.registration_id == reg_id)
             };
             if should_cleanup {
                 cleanup_container(&container_id, &ctx.state).await;
