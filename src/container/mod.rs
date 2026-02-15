@@ -128,7 +128,28 @@ pub async fn resolve_host_addr(config: &Config) -> Result<String, ContainerError
     let mut attempts = Vec::new();
 
     // 1 & 2: CLI flag / env var (both stored in config.host_addr)
+    // If the value is a valid IP address, return it directly.
+    // Otherwise treat it as a hostname and resolve via DNS so the
+    // caller gets a numeric IP suitable for SocketAddr::parse.
     if let Some(ref addr) = config.host_addr {
+        if addr.parse::<std::net::IpAddr>().is_ok() {
+            return Ok(addr.clone());
+        }
+        // Attempt DNS resolution for hostnames like "host.docker.internal"
+        match tokio::net::lookup_host(format!("{addr}:0")).await {
+            Ok(mut addrs) => {
+                if let Some(resolved) = addrs.next() {
+                    let ip = resolved.ip().to_string();
+                    info!(hostname = %addr, resolved = %ip, "resolved explicit host address via DNS");
+                    return Ok(ip);
+                }
+            }
+            Err(e) => {
+                debug!(hostname = %addr, error = %e, "DNS lookup for explicit host address failed");
+            }
+        }
+        // Fall back to returning the raw string — parse_addr will
+        // produce a clear error if it's not a valid address.
         return Ok(addr.clone());
     }
     attempts.push("--host-addr flag / DCBRIDGE_HOST env");
