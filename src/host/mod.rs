@@ -169,7 +169,10 @@ impl ConnectionTracker {
     /// Record a proxy connection finishing; notifies drain waiters on zero.
     fn decrement(&self) {
         let prev = self.count.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(prev > 0, "ConnectionTracker underflow: decrement without matching increment");
+        debug_assert!(
+            prev > 0,
+            "ConnectionTracker underflow: decrement without matching increment"
+        );
         if prev == 1 {
             self.drained.notify_one();
         }
@@ -640,9 +643,7 @@ async fn handle_control_connection(
             let old_forwards = {
                 let mut s = ctx.state.lock().await;
                 let old_state = s.containers.remove(&container_id);
-                if old_state.is_none()
-                    && s.containers.len() >= MAX_CONTAINERS
-                {
+                if old_state.is_none() && s.containers.len() >= MAX_CONTAINERS {
                     warn!(
                         %addr, container_id,
                         max = MAX_CONTAINERS,
