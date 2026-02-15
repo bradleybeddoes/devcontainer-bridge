@@ -27,8 +27,8 @@ This breaks workflows like OAuth flows (which bind a random port, open a browser
 ┌───────────────────── Host Machine (macOS/Linux) ────────────────────┐
 │                                                                     │
 │  dbr host-daemon (long-lived, auto-started)                         │
-│  ├─ Control: 127.0.0.1:19285 (JSON-lines protocol)                 │
-│  ├─ Data:    127.0.0.1:19286 (reverse data connections)             │
+│  ├─ Control: :19285 (JSON-lines protocol)                           │
+│  ├─ Data:    :19286 (reverse data connections)                      │
 │  ├─ Accepts control connections from multiple containers            │
 │  ├─ Binds loopback:PORT for each forwarded port                     │
 │  ├─ Bridges client connections ↔ reverse data connections           │
@@ -51,6 +51,8 @@ This breaks workflows like OAuth flows (which bind a random port, open a browser
 ```
 
 All TCP connections flow **container → host** (reverse connection model). This is required because macOS Docker Desktop runs containers inside a Linux VM — the host cannot initiate connections into the container.
+
+Control and data ports bind to an auto-detected address: `0.0.0.0` when Docker is running (so containers can reach the host), `127.0.0.1` otherwise. Override with `--bind-addr` or `--no-docker-detect`. Forwarded per-port listeners always bind to loopback only.
 
 ### Data Flow
 
@@ -82,7 +84,7 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 ```jsonc
 {
   "features": {
-    "ghcr.io/bradleybeddoes/dbr-feature:latest": {}
+    "ghcr.io/bradleybeddoes/devcontainer-bridge/dbr:latest": {}
   }
 }
 ```
@@ -141,12 +143,14 @@ dbr open URL          Open a URL in the host browser
 ### Host Daemon
 
 ```bash
-dbr host-daemon [--control-port PORT] [--data-port PORT]
+dbr host-daemon [--bind-addr ADDR] [--no-docker-detect]
+                [--control-port PORT] [--data-port PORT]
+                [--browser-cmd COMMAND]
                 [--log-level LEVEL] [--log-format text|json]
                 [--log-file PATH] [--no-exit-on-idle]
 ```
 
-By default, the host daemon exits when the last container disconnects. Use `--no-exit-on-idle` to keep it running.
+By default, the host daemon auto-detects whether to bind to `0.0.0.0` (Docker running) or `127.0.0.1` (no Docker). Use `--bind-addr` to set an explicit address, or `--no-docker-detect` to force loopback. Use `--browser-cmd` to override the default browser command (e.g., `/usr/bin/true` for headless testing). The daemon exits when the last container disconnects unless `--no-exit-on-idle` is set.
 
 ### Container Daemon
 
@@ -207,11 +211,11 @@ One host daemon serves all running devcontainers. When multiple containers forwa
 
 ## Security
 
-- All listeners bind to **loopback only** (`127.0.0.1` / `[::1]`) — same security model as Docker Desktop and `kubectl port-forward`
+- **Two-tier binding model** — Forwarded per-port listeners bind to **loopback only** (`127.0.0.1` / `[::1]`), never `0.0.0.0`. Control and data ports use auto-detected binding (`0.0.0.0` when Docker is detected, `127.0.0.1` otherwise), overridable via `--bind-addr` or `--no-docker-detect`
 - Only `http://` and `https://` URLs accepted for browser opening
 - No Docker socket access required
 - No elevated privileges needed
-- Rate limiting on forward requests, URL opens, and connect requests
+- Rate limiting on browser opens and resource caps on connections, containers, and forwards
 - All events logged with timestamps and container IDs
 - Zero `unsafe` Rust code
 

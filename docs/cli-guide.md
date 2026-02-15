@@ -39,7 +39,7 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 ```jsonc
 {
   "features": {
-    "ghcr.io/bradleybeddoes/dbr-feature:latest": {}
+    "ghcr.io/bradleybeddoes/devcontainer-bridge/dbr:latest": {}
   }
 }
 ```
