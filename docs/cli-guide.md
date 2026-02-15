@@ -159,6 +159,9 @@ For machine-readable output:
 dbr status --json
 ```
 
+This works from inside containers too — `--host` auto-resolves via
+`DCBRIDGE_HOST` env var, then `host.docker.internal` DNS, then `127.0.0.1`.
+
 If the host daemon is on a non-default port:
 
 ```bash
@@ -218,6 +221,7 @@ Start the host daemon if it is not already running. Safe to call repeatedly.
 |------|---------|-------------|
 | `--control-port` | 19285 | Control channel port |
 | `--data-port` | 19286 | Data channel port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
 
 ### `dbr status`
 
@@ -226,15 +230,26 @@ Show active port forwards across all containers.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--control-port` | 19285 | Host daemon control port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
 | `--json` | false | Output as JSON |
 
 ### `dbr forward <PORT>`
 
 Manually forward a container port.
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--control-port` | 19285 | Host daemon control port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
+
 ### `dbr unforward <PORT>`
 
 Manually remove a port forward.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--control-port` | 19285 | Host daemon control port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
 
 ### `dbr open <URL>`
 
