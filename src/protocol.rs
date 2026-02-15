@@ -109,7 +109,7 @@ pub struct ForwardInfo {
     pub process_name: Option<String>,
     /// PID of the process listening on the port, if known.
     pub pid: Option<u32>,
-    /// ISO 8601 timestamp of when the forward was established.
+    /// Unix epoch seconds when the forward was established.
     pub since: String,
 }
 

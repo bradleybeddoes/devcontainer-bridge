@@ -145,7 +145,7 @@ struct ForwardState {
     process_name: Option<String>,
     /// Optional PID.
     pid: Option<u32>,
-    /// ISO 8601 timestamp of when the forward was established.
+    /// Unix epoch seconds when the forward was established.
     since: String,
     /// Active proxy connection tracker for graceful draining.
     tracker: Arc<ConnectionTracker>,
