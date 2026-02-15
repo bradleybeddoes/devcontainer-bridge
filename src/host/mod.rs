@@ -112,15 +112,29 @@ struct ConnectionTracker {
     count: AtomicUsize,
     /// Notified when `count` drops to zero.
     drained: Notify,
+    /// Signals proxy tasks to drop their connections on drain timeout.
+    cancel_tx: watch::Sender<bool>,
 }
 
 impl ConnectionTracker {
     /// Create a tracker with zero active connections.
     fn new() -> Self {
+        let (cancel_tx, _) = watch::channel(false);
         Self {
             count: AtomicUsize::new(0),
             drained: Notify::new(),
+            cancel_tx,
         }
+    }
+
+    /// Subscribe to the cancellation signal for use in proxy tasks.
+    fn cancel_rx(&self) -> watch::Receiver<bool> {
+        self.cancel_tx.subscribe()
+    }
+
+    /// Signal all subscribed proxy tasks to drop their connections.
+    fn cancel(&self) {
+        let _ = self.cancel_tx.send(true);
     }
 
     /// Record a new proxy connection starting.
@@ -987,8 +1001,9 @@ async fn drain_forward_connections(tracker: &ConnectionTracker, port: u16, timeo
                 port,
                 remaining_connections = remaining,
                 timeout_secs = timeout.as_secs(),
-                "drain timeout expired, closing remaining connections"
+                "drain timeout expired, force-closing remaining connections"
             );
+            tracker.cancel();
         }
     }
 }
@@ -1110,9 +1125,25 @@ async fn handle_client_connection(
         return;
     }
 
-    // Bridge when the data connection arrives (or timeout)
-    match bridge_connection(conn_id.clone(), client_conn.stream, data_rx, &ctx.pending).await {
-        Ok((c2s, s2c)) => {
+    // Bridge when the data connection arrives (or timeout).
+    // If the forward is being torn down, the cancel signal drops the
+    // bridge future, force-closing both TCP streams.
+    let bridge_result = match tracker.as_ref() {
+        Some(trk) => {
+            let mut cancel = trk.cancel_rx();
+            tokio::select! {
+                result = bridge_connection(conn_id.clone(), client_conn.stream, data_rx, &ctx.pending) => Some(result),
+                _ = cancel.changed() => {
+                    debug!(conn_id, port, "proxy force-closed by drain");
+                    None
+                }
+            }
+        }
+        None => Some(bridge_connection(conn_id.clone(), client_conn.stream, data_rx, &ctx.pending).await),
+    };
+
+    match bridge_result {
+        Some(Ok((c2s, s2c))) => {
             info!(
                 conn_id,
                 port,
@@ -1121,9 +1152,10 @@ async fn handle_client_connection(
                 "proxy completed"
             );
         }
-        Err(e) => {
+        Some(Err(e)) => {
             debug!(conn_id, port, error = %e, "proxy failed");
         }
+        None => {} // force-closed by drain, already logged
     }
 
     // Decrement active connection count
