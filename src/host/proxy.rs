@@ -175,28 +175,24 @@ pub async fn bridge_connection(
             let pre_read = buffered.len() as u64;
             if !buffered.is_empty() {
                 debug!(conn_id, pre_read_bytes = pre_read, "flushing pre-read data to client");
-                client_stream.write_all(&buffered).await.map_err(|source| {
-                    ProxyError::Io {
-                        conn_id: conn_id.clone(),
-                        source,
-                    }
-                })?;
+                if let Err(source) = client_stream.write_all(&buffered).await {
+                    return Err(ProxyError::Io { conn_id, source });
+                }
             }
 
             debug!(conn_id, "bridging client and data streams");
-            let result = copy_bidirectional(&mut client_stream, &mut stream)
-                .await
-                .map_err(|source| ProxyError::Io {
-                    conn_id: conn_id.clone(),
-                    source,
-                })?;
-            info!(
-                conn_id,
-                client_to_container = result.0,
-                container_to_client = result.1 + pre_read,
-                "proxy connection completed"
-            );
-            Ok((result.0, result.1 + pre_read))
+            match copy_bidirectional(&mut client_stream, &mut stream).await {
+                Ok(result) => {
+                    info!(
+                        conn_id,
+                        client_to_container = result.0,
+                        container_to_client = result.1 + pre_read,
+                        "proxy connection completed"
+                    );
+                    Ok((result.0, result.1 + pre_read))
+                }
+                Err(source) => Err(ProxyError::Io { conn_id, source }),
+            }
         }
         Ok(Err(_)) => {
             // Sender dropped — connection was cancelled or failed
