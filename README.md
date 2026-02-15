@@ -2,11 +2,13 @@
 
 Automatic port forwarding and browser URL opening between devcontainers and the host machine.
 
+This project was initially built as an exploratory collaboration between a @bradleybeddoes and [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams.md). 
+
+Considerable planning and design was undertaken by @bradleybeddoes including technology choice. The codebase, tests, documentation, and E2E validation scripts were created by an initial team of 17 agents and then refined over another few hours of 
+pair programming, the team did exceptionally well but the application didn't function straight "out of the box".
+
 > [!NOTE]
 > This project is in early development. Bugs are expected. It has only been tested with a **macOS host** so far — Linux host support is planned but unverified.
-
-> [!TIP]
-> **Who you gonna call?** This project was built as an exploratory collaboration between a human developer and [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams.md) — multiple AI agents working in parallel to solve a real-world problem. The entire codebase, tests, documentation, and E2E validation scripts were pair-programmed across extended sessions, debugging live OAuth callbacks, chasing BufReader gremlins through TCP bridges, and diagnosing IPv6 hauntings at 2am. The [Ghostbusters](https://en.wikipedia.org/wiki/Ghostbusters) references aren't random — our debugging sessions genuinely felt like hunting down paranormal activity in network stacks. No proton packs were harmed. If there's something strange in your devcontainer neighbourhood... `dbr` is here to help.
 
 ## The Problem
 
@@ -32,7 +34,7 @@ This breaks workflows like OAuth flows (which bind a random port, open a browser
 │  ├─ Accepts control connections from multiple containers            │
 │  ├─ Binds loopback:PORT for each forwarded port                     │
 │  ├─ Bridges client connections ↔ reverse data connections           │
-│  └─ Opens URLs in host browser (open/xdg-open)                     │
+│  └─ Opens URLs in host browser (open/xdg-open)                      │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
           ▲ All connections initiated container → host
