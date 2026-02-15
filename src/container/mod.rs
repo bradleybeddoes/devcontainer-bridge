@@ -287,29 +287,6 @@ pub async fn run(
         });
     }
 
-    // Monitor parent PID — if it changes to 1 (reparented to init),
-    // the container is shutting down. Poll every 5 seconds.
-    #[cfg(unix)]
-    {
-        let tx_ppid = internal_tx.clone();
-        let initial_ppid = std::os::unix::process::parent_id();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let current_ppid = std::os::unix::process::parent_id();
-                if current_ppid != initial_ppid {
-                    info!(
-                        initial_ppid,
-                        current_ppid, "parent PID changed (reparented), shutting down"
-                    );
-                    let _ = tx_ppid.send(true);
-                    return;
-                }
-            }
-        });
-    }
-
     // Drop the original tx so the channel closes when all senders are dropped
     drop(internal_tx);
 
