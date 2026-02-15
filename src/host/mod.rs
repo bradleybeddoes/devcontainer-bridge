@@ -605,7 +605,7 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
 
     // Tear down all active forwards with graceful drain
     let mut state = ctx.state.lock().await;
-    drain_all_forwards(&mut state, drain_timeout).await;
+    drain_all_forwards(&mut state, &ctx.browser, drain_timeout).await;
 
     // Clean up the PID file written by `dbr ensure`
     if let Err(e) = ensure::remove_pid_file() {
@@ -677,6 +677,12 @@ async fn handle_control_connection(
             };
 
             // Tear down old forwards outside the lock
+            if let Some(ref forwards) = old_forwards {
+                let mut b = ctx.browser.lock().await;
+                for &(port, _, _) in forwards {
+                    b.remove_port_mapping(port);
+                }
+            }
             if let Some(forwards) = old_forwards {
                 let mut drain_set = tokio::task::JoinSet::new();
                 for (port, handle, tracker) in forwards {
@@ -728,7 +734,7 @@ async fn handle_control_connection(
                     .is_some_and(|c| c.registration_id == reg_id)
             };
             if should_cleanup {
-                cleanup_container(&container_id, &ctx.state).await;
+                cleanup_container(&container_id, &ctx.state, &ctx.browser).await;
                 info!(container_id, "container disconnected");
             } else {
                 info!(
@@ -1067,7 +1073,11 @@ async fn handle_unforward(container_id: &str, port: u16, state: &Mutex<HostState
 }
 
 /// Clean up all state for a disconnected container.
-async fn cleanup_container(container_id: &str, state: &Mutex<HostState>) {
+async fn cleanup_container(
+    container_id: &str,
+    state: &Mutex<HostState>,
+    browser: &Mutex<BrowserOpener>,
+) {
     let forwards = {
         let mut s = state.lock().await;
         let Some(cstate) = s.containers.remove(container_id) else {
@@ -1088,6 +1098,14 @@ async fn cleanup_container(container_id: &str, state: &Mutex<HostState>) {
             .collect::<Vec<_>>()
     };
 
+    // Remove stale browser port mappings
+    {
+        let mut b = browser.lock().await;
+        for &(port, _, _) in &forwards {
+            b.remove_port_mapping(port);
+        }
+    }
+
     // Await all listener handles first to ensure ports are freed,
     // then drain active proxy connections concurrently.
     let mut drain_set = tokio::task::JoinSet::new();
@@ -1101,7 +1119,11 @@ async fn cleanup_container(container_id: &str, state: &Mutex<HostState>) {
 }
 
 /// Drain all forwards across all containers during daemon shutdown.
-async fn drain_all_forwards(state: &mut HostState, drain_timeout: Duration) {
+async fn drain_all_forwards(
+    state: &mut HostState,
+    browser: &Mutex<BrowserOpener>,
+    drain_timeout: Duration,
+) {
     let mut handles = Vec::new();
 
     for (_cid, cstate) in state.containers.drain() {
@@ -1111,6 +1133,14 @@ async fn drain_all_forwards(state: &mut HostState, drain_timeout: Duration) {
         }
     }
     state.used_host_ports.clear();
+
+    // Clear all browser port mappings
+    {
+        let mut b = browser.lock().await;
+        for &(port, _, _) in &handles {
+            b.remove_port_mapping(port);
+        }
+    }
 
     let mut drain_set = tokio::task::JoinSet::new();
     for (port, handle, tracker) in handles {
