@@ -1,6 +1,6 @@
 # Development Container Bridge (`dbr`)
 
-Automatic port forwarding and browser URL opening between devcontainers and the host machine.
+Automatic port forwarding and browser URL opening between devcontainers and the host machine for CLI users.
 
 This project was initially built as an exploratory collaboration between a @bradleybeddoes and [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams.md). 
 
