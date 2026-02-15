@@ -240,6 +240,7 @@ cargo build --release --target aarch64-unknown-linux-musl
 - [Security Model](docs/security.md) — threat model, security guarantees, audit guidance
 - [CLI Developer Guide](docs/cli-guide.md) — terminal workflow setup, troubleshooting
 - [Team Adoption Guide](docs/team-guide.md) — adding to shared configs, VS Code compatibility FAQ
+- [Development Guide](docs/development.md) — building, testing, debugging, and iterating on `dbr`
 
 ## License
 

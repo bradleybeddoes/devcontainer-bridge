@@ -19,27 +19,68 @@ This document describes the threat model, security guarantees, and audit guidanc
 - **Encrypted transport.** The control and data channels use plaintext TCP on loopback. Since both endpoints are on the same machine (or within the Docker Desktop VM), TLS is unnecessary — the same trust boundary as Docker Desktop port publishing, `kubectl port-forward`, and SSH `-L` tunnels.
 - **Authentication between daemons.** Any process on the host can connect to the control port. This matches the security model of Docker Desktop (any local process can talk to the Docker socket) and `kubectl` (any local process can use the forwarded port).
 
-## Localhost-Only Binding
+## Two-Tier Binding Model
 
-All TCP listeners in `dbr` bind exclusively to loopback addresses:
+`dbr` uses a two-tier binding model that balances container reachability with host security:
+
+### Tier 1: Control and Data ports (container-reachable)
+
+| Listener | Default bind | Port | Source |
+|----------|-------------|------|--------|
+| Control channel | auto-detected | 19285 | `src/control.rs` |
+| Data channel | auto-detected | 19286 | `src/host/mod.rs` |
+
+The bind address for control and data ports is **auto-detected** at startup:
+
+1. **`--bind-addr` explicitly set** -- uses the specified address, no auto-detection.
+2. **`--no-docker-detect` flag set** -- binds to `127.0.0.1`, no auto-detection.
+3. **Docker detected** (via `docker info`) -- binds to `0.0.0.0` (all interfaces) so containers can reach the host via Docker Desktop's gateway IP (`host.docker.internal`).
+4. **No Docker detected** -- binds to `127.0.0.1` (loopback only).
+
+This auto-detection means the daemon only exposes ports on all interfaces when Docker is actually running, minimizing unnecessary network exposure. Binding to `0.0.0.0` is **required** for Docker Desktop on macOS, where containers reach the host via a gateway IP (`host.docker.internal` resolves to an address like `192.168.65.254`), not via `127.0.0.1`.
+
+When bound to `0.0.0.0`, this is safe because:
+
+- The control protocol is designed for **untrusted clients**: all messages are validated, bounded (64 KB), and parsed strictly. Unknown message types, oversized fields, and malformed JSON are rejected.
+- **Resource limits** prevent abuse: max 64 containers, max 128 forwards per container, max 1024 pending connections, 5 URL opens/sec rate limit.
+- **No privileged operations** are exposed: the only host-side actions are binding loopback ports (Tier 2) and opening validated HTTP/HTTPS URLs.
+- The `--bind-addr` and `--no-docker-detect` flags allow explicit control over the bind address.
+
+### Tier 2: Forwarded ports (loopback-only)
 
 | Listener | Bind address | Port | Source |
 |----------|-------------|------|--------|
-| Control channel | `127.0.0.1` | 19285 | `src/control.rs:136` |
-| Data channel | `127.0.0.1` | 19286 | `src/host/mod.rs:232` |
 | Forwarded ports | `[::1]` then `127.0.0.1` | per-port | `src/host/listener.rs:48-62` |
 
-The codebase **never** binds to `0.0.0.0` or `[::]`. This is enforced as a project invariant in `CLAUDE.md` and checked by the security audit.
+Forwarded ports **always** bind to loopback only (`[::1]` with `127.0.0.1` fallback), regardless of the `--bind-addr` setting. These ports expose container services to the host user and must never be network-accessible.
 
-### Why this is sufficient
+### Configuring the bind address
 
-This is the same security model used by:
+Use `--bind-addr` or `--no-docker-detect` to control which interfaces the control and data ports listen on:
 
-- **Docker Desktop** — publishes container ports to `localhost` only on macOS/Windows
-- **kubectl port-forward** — binds to `127.0.0.1` by default
-- **SSH local forwarding (`-L`)** — binds to loopback by default
+```bash
+# Default: auto-detect (0.0.0.0 if Docker running, 127.0.0.1 otherwise)
+dbr host-daemon
 
-On a typical developer workstation, processes on loopback are trusted at the same level as the logged-in user. No network-facing exposure is created.
+# Explicit bind address (overrides auto-detection)
+dbr host-daemon --bind-addr 0.0.0.0
+
+# Restrict to loopback only (skip Docker detection)
+dbr host-daemon --no-docker-detect
+
+# Restrict to loopback only (explicit)
+dbr host-daemon --bind-addr 127.0.0.1
+```
+
+### Why this model is sufficient
+
+The two-tier approach follows established patterns:
+
+- **Docker Desktop** — publishes container ports to `localhost` only, but its own API socket listens on all interfaces within the VM
+- **kubectl port-forward** — binds to `127.0.0.1` by default for user-facing ports
+- **SSH local forwarding (`-L`)** — binds to loopback by default, but `GatewayPorts` allows binding to all interfaces when needed
+
+On a typical developer workstation, the control and data ports accept only the `dbr` protocol (not arbitrary user traffic), making network exposure low-risk. Forwarded ports, which expose actual container services, remain loopback-only.
 
 ## URL Validation
 
@@ -169,13 +210,13 @@ The project uses a focused set of well-maintained crates:
 
 ## Verification Commands
 
-### Verify loopback-only binding
+### Verify binding addresses
 
-After starting the host daemon, confirm that all listeners are bound to loopback:
+After starting the host daemon, confirm the two-tier binding model:
 
 **macOS:**
 ```bash
-# Show all dbr listeners — all should be on 127.0.0.1 or ::1
+# Show all dbr listeners
 lsof -iTCP -sTCP:LISTEN -P -n | grep dbr
 ```
 
@@ -185,7 +226,9 @@ lsof -iTCP -sTCP:LISTEN -P -n | grep dbr
 ss -tlnp | grep dbr
 ```
 
-Expected output should show only `127.0.0.1:PORT` or `[::1]:PORT` addresses. If you see `0.0.0.0` or `*` or `[::]`, something is wrong.
+Expected output:
+- **Control port (19285)** and **data port (19286)** should be on `*:PORT` or `0.0.0.0:PORT` (when Docker detected or `--bind-addr 0.0.0.0` used) or `127.0.0.1:PORT` (when no Docker detected, `--no-docker-detect` used, or `--bind-addr 127.0.0.1` used).
+- **Forwarded ports** should always show `127.0.0.1:PORT` or `[::1]:PORT`. If you see `0.0.0.0` on a forwarded port, something is wrong.
 
 ### Verify no Docker socket access
 

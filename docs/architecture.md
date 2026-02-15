@@ -18,12 +18,14 @@ The solution mirrors SSH reverse port forwarding (`ssh -R`): the container daemo
 
 ### Two host-side ports
 
-The host daemon listens on two loopback-bound TCP ports:
+The host daemon listens on two TCP ports, bound to all interfaces (`0.0.0.0`) by default so containers can reach them via Docker Desktop's gateway IP:
 
-| Port | Default | Role |
-|------|---------|------|
-| **Control** | `19285` | JSON-line protocol messages (registration, forward/unforward, heartbeats, URL open requests) |
-| **Data** | `19286` | Reverse data connections for TCP proxying (one per client connection) |
+| Port | Default | Default Bind | Role |
+|------|---------|-------------|------|
+| **Control** | `19285` | `0.0.0.0` | JSON-line protocol messages (registration, forward/unforward, heartbeats, URL open requests) |
+| **Data** | `19286` | `0.0.0.0` | Reverse data connections for TCP proxying (one per client connection) |
+
+The bind address is configurable via `--bind-addr` (e.g., `--bind-addr 127.0.0.1` for loopback-only).
 
 Separating control from data keeps the protocol simple — the control channel is a persistent, framed JSON-line stream, while data connections carry raw TCP bytes after a one-line handshake.
 
@@ -391,9 +393,13 @@ Pending connections are stored in a `HashMap<String, oneshot::Sender<TcpStream>>
 - **Cancellation:** On `ConnectFailed`, the pending entry is removed so the waiting side receives a `RecvError`.
 - **Capacity:** Maximum 1024 pending connections. When the limit is reached, stale entries (whose receiver was dropped due to timeout) are pruned.
 
-### Loopback Binding
+### Two-Tier Binding
 
-Forwarded port listeners bind to **loopback only**:
+The host daemon uses a two-tier binding model:
+
+**Control and data ports** bind to all interfaces (`0.0.0.0`) by default, configurable via `--bind-addr`. This is necessary for Docker Desktop on macOS where containers reach the host via a gateway IP, not loopback.
+
+**Forwarded port listeners** always bind to **loopback only**, regardless of `--bind-addr`:
 
 1. Try `[::1]:{port}` first (IPv6 loopback, supports dual-stack on some systems).
 2. Fall back to `127.0.0.1:{port}` if IPv6 binding fails.

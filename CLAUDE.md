@@ -21,10 +21,12 @@ All TCP connections are initiated **container to host** (reverse connection mode
 
 ### Channels
 
-| Channel | Default port | Purpose |
-|---------|-------------|---------|
-| Control | `127.0.0.1:19285` | JSON-line protocol for registration, Forward/Unforward, OpenUrl, Ping/Pong, ListRequest/ListResponse |
-| Data | `127.0.0.1:19286` | Reverse data connections from containers for TCP proxying |
+| Channel | Default port | Default bind | Purpose |
+|---------|-------------|-------------|---------|
+| Control | `19285` | auto-detected | JSON-line protocol for registration, Forward/Unforward, OpenUrl, Ping/Pong, ListRequest/ListResponse |
+| Data | `19286` | auto-detected | Reverse data connections from containers for TCP proxying |
+
+Control and data ports use auto-detected bind addresses: `0.0.0.0` if Docker is running (so containers can reach the host via Docker Desktop's gateway IP), `127.0.0.1` otherwise. Configurable with `--bind-addr` or `--no-docker-detect`.
 
 ### Data flow for a proxied connection
 
@@ -44,7 +46,7 @@ All TCP connections are initiated **container to host** (reverse connection mode
 - **Reverse data connections** — All connections flow container-to-host because macOS Docker Desktop cannot route to container IPs (containers live in a Linux VM). Same pattern as SSH `-R` reverse port forwarding.
 - **TCP control channel (not Unix socket)** — No Docker volume mount or `devcontainer.json` modification required. Works through `host.docker.internal` DNS.
 - **Two ports (control + data)** — Separates the framed JSON-line protocol from raw TCP byte streams cleanly. Control messages stay parseable; data connections switch to raw bytes after a single handshake line.
-- **Loopback-only binding** — All listeners (control, data, forwarded ports) bind to `127.0.0.1` or `[::1]` only, never `0.0.0.0`. Same security model as Docker Desktop, kubectl port-forward, SSH -L.
+- **Two-tier binding** — Control and data ports use auto-detected bind addresses (`0.0.0.0` if Docker is running, `127.0.0.1` otherwise), configurable via `--bind-addr` or `--no-docker-detect`. Forwarded per-port listeners always bind to loopback (`[::1]`/`127.0.0.1`) only. The control protocol is hardened against untrusted clients (message limits, field validation, resource caps).
 - **Single binary** — `dbr host-daemon` and `dbr container-daemon` are subcommands of the same binary. `dbr-open` is a hardlink for `BROWSER` env var integration.
 
 ---
@@ -54,7 +56,7 @@ All TCP connections are initiated **container to host** (reverse connection mode
 ```
 src/
   main.rs               CLI entrypoint, clap dispatch, tracing init, dbr-open hardlink detection
-  cli.rs                Clap subcommand definitions (HostDaemon, ContainerDaemon, Status, Forward, Unforward, Open, Ensure)
+  cli.rs                Clap subcommand definitions (HostDaemon with --bind-addr/--no-docker-detect, ContainerDaemon, Status, Forward, Unforward, Open, Ensure)
   protocol.rs           All JSON-line message types (Register, Forward, ConnectRequest, OpenUrl, Ping/Pong, etc.)
   control.rs            TCP JSON-line framing (read_message/write_message), ControlListener, ControlConnection, connect()
   config.rs             Config struct, TOML file loading (~/.config/dbr/config.toml), env var layering (DCBRIDGE_HOST, DCBRIDGE_HOST_PORT)
@@ -89,7 +91,7 @@ tests/
 - **All public APIs have `///` doc comments** including `# Errors` sections
 - **`cargo clippy -- -D warnings`** must pass
 - **`cargo fmt`** must pass
-- **Loopback-only binding** — every TCP listener must bind to `127.0.0.1` or `[::1]`, never `0.0.0.0` or `[::]`
+- **Two-tier binding model** — control and data ports use auto-detected bind addresses (`0.0.0.0` if Docker is running, `127.0.0.1` otherwise), configurable via `--bind-addr` or `--no-docker-detect`. Forwarded per-port listeners (`bind_loopback`) must always bind to `127.0.0.1` or `[::1]`, never `0.0.0.0` or `[::]`.
 - **Structured logging** via `tracing` crate — `info` for lifecycle events (register, forward, disconnect), `debug` for per-connection events, `warn` for recoverable errors, `error` for fatal errors
 - **Error types** — each module has its own `thiserror` error enum. Use `#[from]` for transparent wrapping, `#[source]` for explicit chaining.
 
@@ -115,35 +117,57 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-### Cross-compilation (Linux static binaries)
+### Cross-compilation (Linux container binary)
+
+On Apple Silicon macOS, `cross` does not work reliably for `aarch64-unknown-linux-musl`. Use the Docker approach instead:
+
 ```bash
-# Requires cross: cargo install cross
-cross build --release --target x86_64-unknown-linux-musl
-cross build --release --target aarch64-unknown-linux-musl
+# Build a Linux aarch64 binary using Docker (works on Apple Silicon)
+docker run --rm -v "$(pwd)":/src -w /src rust:1.93-alpine \
+  sh -c 'apk add musl-dev && cargo build --release'
 ```
 
-### macOS native builds
+This produces a Linux binary at `target/release/dbr`. Note that this overwrites the macOS host binary — rebuild with `cargo build --release` if you need the host binary again.
+
+### Deploy to a container
 ```bash
-cargo build --release --target x86_64-apple-darwin
-cargo build --release --target aarch64-apple-darwin
+# Find your devcontainer
+docker ps --format '{{.Names}}' | grep devcontainer | grep app
+
+# Copy the Linux binary in
+docker cp ./target/release/dbr <container>:/usr/local/bin/dbr
+
+# Start the container daemon
+docker exec -d <container> dbr container-daemon
 ```
 
-### E2E test with Docker
+### End-to-end validation with `scripts/dev-test.sh`
+
+The automated test script handles the full build-deploy-test cycle:
+
 ```bash
-# 1. Build the Linux binary
-cross build --release --target x86_64-unknown-linux-musl
+# Full cycle: build both binaries, deploy, run all tests
+scripts/dev-test.sh
 
-# 2. Start host daemon
-cargo run --release -- host-daemon &
+# Skip builds (use existing binaries)
+scripts/dev-test.sh --skip-build
 
-# 3. In a running devcontainer:
-#    - Copy binary in, run `dbr container-daemon`
-#    - Start a service: `nc -l -p 8080`
-#    - From host: `curl 127.0.0.1:8080`
-
-# 4. Verify `dbr status` shows the forward
-cargo run --release -- status
+# Target a specific container
+scripts/dev-test.sh --container myproject
 ```
+
+The script tests:
+- Host daemon startup and control port binding
+- Container daemon registration
+- Automatic port detection and forwarding
+- TCP data transfer through forwarded ports
+- Port cleanup when listeners stop
+- Browser URL opening (OpenUrl protocol flow)
+- `dbr ensure` idempotency
+
+Run this after making changes to validate nothing is broken. It exits non-zero if any test fails.
+
+See [docs/development.md](docs/development.md) for the full development guide.
 
 ---
 
@@ -193,7 +217,7 @@ cargo run --release -- status
 
 These MUST be maintained in all changes:
 
-1. **Loopback-only binding** — All listeners (`ControlListener::bind`, `bind_loopback`, data listener in `host/mod.rs`) must bind to `127.0.0.1` or `[::1]`. Never `0.0.0.0` or `[::]`.
+1. **Two-tier binding model** — Control and data listeners (`ControlListener::bind`, data listener in `host/mod.rs`) use auto-detected bind addresses: `0.0.0.0` when Docker is detected, `127.0.0.1` otherwise. Overridable with `--bind-addr` (explicit address) or `--no-docker-detect` (force loopback). Forwarded per-port listeners (`bind_loopback` in `host/listener.rs`) must always bind to `127.0.0.1` or `[::1]`. Never bind forwarded ports to `0.0.0.0` or `[::]`.
 2. **URL scheme validation** — Only `http://` and `https://` URLs accepted for browser opening. Validated in both `container/browser.rs` and `host/browser.rs`.
 3. **URL length cap** — 2048 characters maximum.
 4. **Rate limiting** — Browser opens capped at 5/sec (sliding window in `host/browser.rs`).
@@ -231,3 +255,51 @@ These MUST be maintained in all changes:
 - Use `tcp_pair()` helper for creating connected TCP stream pairs
 - Use `tokio::time::timeout` to prevent hung tests
 - Host daemon started with `exit_on_idle: true` for self-cleanup, or `abort()` for tests that need manual control
+
+---
+
+## Validating changes end-to-end
+
+After making code changes, follow this sequence to validate:
+
+### 1. Run unit tests and linting
+
+```bash
+cargo test
+cargo clippy -- -D warnings
+cargo fmt --check
+```
+
+### 2. Run the automated E2E test (requires a running devcontainer)
+
+```bash
+scripts/dev-test.sh
+```
+
+This builds both binaries, deploys to containers, and runs all end-to-end tests. It exits non-zero on any failure.
+
+### 3. Build cycle details
+
+The build-deploy-test cycle uses two different build approaches:
+
+- **Host binary (macOS):** `cargo build --release` — standard Cargo build, produces a macOS arm64 binary
+- **Container binary (Linux):** `docker run --rm -v $(pwd):/src -w /src rust:1.93-alpine sh -c 'apk add musl-dev && cargo build --release'` — builds inside an Alpine container, produces a Linux aarch64 binary
+
+The `cross` crate is broken on Apple Silicon for the `aarch64-unknown-linux-musl` target. Always use the Docker approach for Linux binaries.
+
+### 4. Quick iteration
+
+For fast iteration when only host-side code changed:
+```bash
+cargo build --release && ./target/release/dbr host-daemon --log-level debug
+```
+
+For container-side changes, rebuild the Linux binary and redeploy:
+```bash
+docker run --rm -v "$(pwd)":/src -w /src rust:1.93-alpine sh -c 'apk add musl-dev && cargo build --release'
+docker cp ./target/release/dbr <container>:/usr/local/bin/dbr
+docker exec <container> pkill -f "dbr container-daemon" || true
+docker exec -d <container> dbr container-daemon
+```
+
+Or use `scripts/dev-test.sh --skip-build` to re-test with existing binaries after a manual redeploy.
