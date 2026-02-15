@@ -271,20 +271,10 @@ pub async fn run(
             let _ = tx_term.send(true);
         });
 
-        let tx_hup = internal_tx.clone();
-        tokio::spawn(async move {
-            let mut sighup =
-                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(error = %e, "failed to register SIGHUP handler");
-                        return;
-                    }
-                };
-            sighup.recv().await;
-            info!("received SIGHUP, shutting down");
-            let _ = tx_hup.send(true);
-        });
+        // Note: no SIGHUP handler — nohup sets SIGHUP to SIG_IGN and
+        // registering a handler would override that, causing the daemon
+        // to shut down when the launching shell (e.g. postStartCommand)
+        // exits. SIGTERM is sufficient for graceful shutdown.
     }
 
     // Drop the original tx so the channel closes when all senders are dropped
