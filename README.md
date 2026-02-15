@@ -91,7 +91,7 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 }
 ```
 
-This installs the `dbr` binary and creates the `dbr-open` hardlink. It does **not** start any daemon or modify environment variables.
+This installs the `dbr` binary and creates the `dbr-open` hardlink. The container daemon starts automatically when the container boots — no manual setup required.
 
 ### 3. Configure your personal dotfiles (container side)
 
@@ -101,21 +101,13 @@ Add to your `~/.zshrc` or `~/.bashrc` inside the container (via your personal do
 export BROWSER=dbr-open
 ```
 
-### 4. Start the daemons
-
-On the host:
+### 4. Start the host daemon
 
 ```bash
 dbr ensure   # starts host daemon if not already running
 ```
 
-Inside the container:
-
-```bash
-dbr container-daemon &
-```
-
-Or integrate into your shell aliases (see below).
+The container daemon is already running (auto-started by the devcontainer feature on boot).
 
 ### 5. Verify
 
@@ -198,8 +190,8 @@ dcup() {
   project=$(_dc_project) || return 1
   _dc_install_dotfiles "$project"
 
-  # Start container daemon in the background
-  docker compose -p "$project" exec -d app dbr container-daemon
+  # Container daemon starts automatically via the devcontainer feature's
+  # postStartCommand — no manual launch needed.
 }
 ```
 

@@ -45,8 +45,9 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 ```
 
 This installs the `dbr` binary at `/usr/local/bin/dbr` and creates the
-`dbr-open` hardlink. It does **not** start any daemon or set environment
-variables -- the binary is inert until explicitly invoked.
+`dbr-open` hardlink. The container daemon starts automatically when the
+container boots via the feature's `postStartCommand` lifecycle hook -- no
+manual launch needed.
 
 ### 3. Start the host daemon
 
@@ -57,16 +58,8 @@ dbr ensure
 This starts the host daemon if it is not already running. It is idempotent --
 running it multiple times is safe.
 
-### 4. Start the container daemon
-
-From the host, after your container is running:
-
-```bash
-docker compose -p myproject exec -d app dbr container-daemon
-```
-
-That's it. Ports that processes bind inside the container are now automatically
-forwarded to `localhost` on the host.
+That's it. The container daemon is already running. Ports that processes bind
+inside the container are now automatically forwarded to `localhost` on the host.
 
 ---
 
@@ -77,7 +70,8 @@ functions so it runs transparently.
 
 ### `dcup` -- start container with forwarding
 
-Add `dbr ensure` and the container daemon launch to your `dcup` function:
+Add `dbr ensure` to your `dcup` function. The container daemon starts
+automatically via the devcontainer feature's `postStartCommand`:
 
 ```bash
 dcup() {
@@ -94,25 +88,20 @@ dcup() {
   project=$(_dc_project) || return 1
   _dc_install_dotfiles "$project"
 
-  # Start container daemon in the background
-  docker compose -p "$project" exec -d app dbr container-daemon
+  # Container daemon starts automatically via the devcontainer feature's
+  # postStartCommand — no manual launch needed.
 }
 ```
 
-### `dctmux` -- resume session with daemon recovery
+### `dctmux` -- resume session
 
-If a container is restarted (not rebuilt), the container daemon dies. Add a
-recovery check to `dctmux`:
+The container daemon auto-starts on every container boot via `postStartCommand`,
+so `dctmux` no longer needs a manual recovery check:
 
 ```bash
 dctmux() {
   local project
   project=$(_dc_project) || return 1
-
-  # Ensure container daemon is running (recover after restart)
-  docker compose -p "$project" exec app \
-    pgrep -f "dbr container-daemon" > /dev/null 2>&1 \
-    || docker compose -p "$project" exec -d app dbr container-daemon
 
   if [[ $# -gt 0 ]]; then
     docker compose -p "$project" exec "${_DC_SSH_AGENT_ENV[@]}" app tmux "$@"
@@ -123,9 +112,6 @@ dctmux() {
   fi
 }
 ```
-
-With this in place, every time you attach to a tmux session, port forwarding is
-guaranteed to be active.
 
 ---
 

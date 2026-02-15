@@ -140,7 +140,8 @@ docker ps --format '{{.Names}}' | grep devcontainer | grep app
 # Copy the Linux binary in
 docker cp ./target/release/dbr <container>:/usr/local/bin/dbr
 
-# Start the container daemon
+# Start the container daemon (normally auto-started by the devcontainer
+# feature's postStartCommand, but manual start is needed after a binary swap)
 docker exec -d <container> dbr container-daemon
 ```
 
