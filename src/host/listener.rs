@@ -36,28 +36,32 @@ pub struct ClientConnection {
 
 /// Bind a loopback TCP listener for the given port.
 ///
-/// Tries `[::1]:port` first. If that fails, falls back to `127.0.0.1:port`.
+/// Tries `127.0.0.1:port` first. If that fails, falls back to `[::1]:port`.
 /// **Never** binds to `0.0.0.0` or `[::]`.
+///
+/// IPv4 (`127.0.0.1`) is preferred because most clients — including browsers,
+/// OAuth callbacks, and CLI tools like `nc` and `curl` — default to connecting
+/// via IPv4 when given `localhost`.
 ///
 /// # Errors
 ///
 /// Returns [`ListenerError::Bind`] if all bind attempts fail.
 async fn bind_loopback(port: u16) -> Result<TcpListener, ListenerError> {
-    // Try [::1] first (dual-stack on some systems)
-    let ipv6_addr: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
-    match TcpListener::bind(ipv6_addr).await {
+    // Try 127.0.0.1 first (preferred — most clients default to IPv4)
+    let ipv4_addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    match TcpListener::bind(ipv4_addr).await {
         Ok(listener) => {
-            debug!(port, addr = %ipv6_addr, "bound listener on [::1]");
+            debug!(port, addr = %ipv4_addr, "bound listener on 127.0.0.1");
             return Ok(listener);
         }
         Err(e) => {
-            debug!(port, error = %e, "failed to bind [::1], falling back to 127.0.0.1");
+            debug!(port, error = %e, "failed to bind 127.0.0.1, falling back to [::1]");
         }
     }
 
-    // Fallback to 127.0.0.1
-    let ipv4_addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    TcpListener::bind(ipv4_addr)
+    // Fallback to [::1]
+    let ipv6_addr: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
+    TcpListener::bind(ipv6_addr)
         .await
         .map_err(|source| ListenerError::Bind { port, source })
 }
@@ -149,10 +153,10 @@ mod tests {
         let (bound_port, handle) = start_listener(0, shutdown_rx, tx).await.unwrap();
         assert!(bound_port > 0);
 
-        // Connect a client — use [::1] since bind_loopback prefers IPv6
+        // Connect a client — try 127.0.0.1 first since bind_loopback prefers IPv4
         let addrs: &[std::net::SocketAddr] = &[
-            ([0, 0, 0, 0, 0, 0, 0, 1], bound_port).into(),
             ([127, 0, 0, 1], bound_port).into(),
+            ([0, 0, 0, 0, 0, 0, 0, 1], bound_port).into(),
         ];
         let mut client = tokio::net::TcpStream::connect(addrs).await.unwrap();
         client.write_all(b"hello").await.unwrap();
