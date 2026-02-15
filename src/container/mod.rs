@@ -172,16 +172,13 @@ async fn resolve_gateway_ip() -> Option<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some("default"), Some("via"), Some(ip)) => Some(ip.to_owned()),
-                _ => None,
-            }
-        })
-        .next()
+    stdout.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("default"), Some("via"), Some(ip)) => Some(ip.to_owned()),
+            _ => None,
+        }
+    })
 }
 
 /// Get the container ID, preferring the hostname.
