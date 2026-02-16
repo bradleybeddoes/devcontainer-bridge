@@ -75,14 +75,6 @@ fn main() -> ExitCode {
         return run_dbr_open();
     }
 
-    // When invoked as `dbr-start-daemon` (hardlink), spawn the container
-    // daemon as a detached child process. This replaces the shell wrapper
-    // so that the logic lives in the binary (always fresh via GitHub
-    // releases) rather than install.sh (cached in Docker image layers).
-    if invoked_as_start_daemon() {
-        return run_start_daemon();
-    }
-
     let cli = Cli::parse();
 
     match cli.command {
@@ -508,102 +500,6 @@ fn run_dbr_open() -> ExitCode {
     init_tracing("warn", "text", None);
     let config = Config::from_env().unwrap_or_default();
     run_async(browser::open_url(&url, config.control_port))
-}
-
-/// Check whether `dbr container-daemon` is already running by scanning /proc.
-///
-/// Uses /proc/{pid}/cmdline to match processes whose command starts with
-/// "dbr" and includes "container-daemon", excluding our own PID.
-fn is_container_daemon_running() -> bool {
-    let our_pid = std::process::id().to_string();
-    let proc_path = std::path::Path::new("/proc");
-    if !proc_path.exists() {
-        // Not on Linux; fall back to pgrep
-        return std::process::Command::new("pgrep")
-            .args(["-f", "dbr container-daemon"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-    }
-
-    let Ok(entries) = std::fs::read_dir(proc_path) else {
-        return false;
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let pid = name.to_string_lossy();
-        if !pid.chars().all(|c| c.is_ascii_digit()) || pid == our_pid {
-            continue;
-        }
-        let cmdline_path = proc_path.join(pid.as_ref()).join("cmdline");
-        if let Ok(data) = std::fs::read(&cmdline_path) {
-            let cmdline = String::from_utf8_lossy(&data);
-            if cmdline.contains("dbr") && cmdline.contains("container-daemon") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Check whether the binary was invoked via a `dbr-start-daemon` hardlink.
-fn invoked_as_start_daemon() -> bool {
-    std::env::args()
-        .next()
-        .and_then(|arg0| {
-            std::path::Path::new(&arg0)
-                .file_name()
-                .and_then(|f| f.to_str())
-                .map(|name| name == "dbr-start-daemon")
-        })
-        .unwrap_or(false)
-}
-
-/// Handle invocation as `dbr-start-daemon` (hardlink mode).
-///
-/// Checks whether the container daemon is already running. If not, spawns
-/// it via a shell one-liner that is proven to survive Docker exec session
-/// teardown. The shell's `nohup ... &` + `sleep 1` pattern correctly
-/// detaches the daemon in a way that `std::process::Command::spawn()`
-/// alone cannot replicate (the shell's `&` creates a proper background
-/// job with different process group semantics).
-///
-/// This logic lives in the binary (rather than install.sh) so that it is
-/// always fresh — install.sh is baked into Docker image layers and cached.
-fn run_start_daemon() -> ExitCode {
-    // Check if already running via /proc scan (avoids pgrep matching ourselves)
-    if is_container_daemon_running() {
-        return ExitCode::SUCCESS;
-    }
-
-    // Use a shell one-liner to daemonize.  Two critical details:
-    //
-    // 1. `trap '' HUP` — sets SIGHUP to SIG_IGN in the shell *before*
-    //    the fork for `&`.  The child inherits SIG_IGN, so it survives
-    //    the SIGHUP that the kernel sends when Docker tears down the
-    //    exec session's PTY.  Without this, the child can die before
-    //    nohup even gets to run.
-    //
-    // 2. `sleep 1` — keeps the shell alive long enough for the child
-    //    to be scheduled and start executing.
-    match std::process::Command::new("sh")
-        .args([
-            "-c",
-            "trap '' HUP; nohup dbr container-daemon --log-level warn >/dev/null 2>&1 & sleep 1",
-        ])
-        .status()
-    {
-        Ok(s) if s.success() => ExitCode::SUCCESS,
-        Ok(s) => {
-            eprintln!("dbr-start-daemon: shell exited with {s}");
-            ExitCode::FAILURE
-        }
-        Err(e) => {
-            eprintln!("dbr-start-daemon: failed to spawn shell: {e}");
-            ExitCode::FAILURE
-        }
-    }
 }
 
 /// Initialize the tracing subscriber with the given log level, format, and optional file.

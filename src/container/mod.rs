@@ -273,7 +273,7 @@ pub async fn run(
 
         // Note: no SIGHUP handler — nohup sets SIGHUP to SIG_IGN and
         // registering a handler would override that, causing the daemon
-        // to shut down when the launching shell (e.g. postStartCommand)
+        // to shut down when the launching shell (e.g. entrypoint)
         // exits. SIGTERM is sufficient for graceful shutdown.
     }
 

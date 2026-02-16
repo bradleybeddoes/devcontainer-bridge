@@ -47,7 +47,7 @@ Control and data ports use auto-detected bind addresses: `0.0.0.0` if Docker is 
 - **TCP control channel (not Unix socket)** — No Docker volume mount or `devcontainer.json` modification required. Works through `host.docker.internal` DNS.
 - **Two ports (control + data)** — Separates the framed JSON-line protocol from raw TCP byte streams cleanly. Control messages stay parseable; data connections switch to raw bytes after a single handshake line.
 - **Two-tier binding** — Control and data ports use auto-detected bind addresses (`0.0.0.0` if Docker is running, `127.0.0.1` otherwise), configurable via `--bind-addr` or `--no-docker-detect`. Forwarded per-port listeners always bind to loopback (`[::1]`/`127.0.0.1`) only. The control protocol is hardened against untrusted clients (message limits, field validation, resource caps).
-- **Single binary** — `dbr host-daemon` and `dbr container-daemon` are subcommands of the same binary. `dbr-open` is a hardlink for `BROWSER` env var integration.
+- **Single binary** — `dbr host-daemon` and `dbr container-daemon` are subcommands of the same binary. `dbr-open` is a hardlink for `BROWSER` env var integration. The container daemon is auto-started via the devcontainer feature's entrypoint script.
 
 ---
 
@@ -56,6 +56,7 @@ Control and data ports use auto-detected bind addresses: `0.0.0.0` if Docker is 
 ```
 src/
   main.rs               CLI entrypoint, clap dispatch, tracing init, dbr-open hardlink detection
+  dbr/entrypoint.sh     Devcontainer feature entrypoint — starts container daemon on container boot
   cli.rs                Clap subcommand definitions (HostDaemon with --bind-addr/--no-docker-detect, ContainerDaemon, Status, Forward, Unforward, Open, Ensure)
   protocol.rs           All JSON-line message types (Register, Forward, ConnectRequest, OpenUrl, Ping/Pong, etc.)
   control.rs            TCP JSON-line framing (read_message/write_message), ControlListener, ControlConnection, connect()
@@ -89,7 +90,7 @@ tests/
 
 ## Code conventions
 
-- **Zero `unsafe` blocks** — no exceptions
+- **Zero `unsafe` blocks** — no exceptions.
 - **No `unwrap()`/`expect()` in production paths** — use `thiserror` error types with `?` propagation throughout. `unwrap()` is acceptable only in tests.
 - **All public APIs have `///` doc comments** including `# Errors` sections
 - **`cargo clippy -- -D warnings`** must pass
@@ -141,7 +142,7 @@ docker ps --format '{{.Names}}' | grep devcontainer | grep app
 docker cp ./target/release/dbr <container>:/usr/local/bin/dbr
 
 # Start the container daemon (normally auto-started by the devcontainer
-# feature's postStartCommand, but manual start is needed after a binary swap)
+# feature's entrypoint, but manual start is needed after a binary swap)
 docker exec -d <container> dbr container-daemon
 ```
 
@@ -228,7 +229,7 @@ These MUST be maintained in all changes:
 5. **Message size limit** — Control messages capped at 64KB (`MAX_MESSAGE_SIZE` in `control.rs`). Bounded reads prevent OOM.
 6. **No Docker socket access** — Container daemon reads only `/proc/net/tcp` (world-readable).
 7. **No command injection** — URLs passed as arguments to `open`/`xdg-open` via `Command::new().arg()`, never via shell interpolation.
-8. **No `unsafe` code** — zero `unsafe` blocks.
+8. **No `unsafe` blocks** — no exceptions.
 9. **Resource limits** — Max 64 containers (`MAX_CONTAINERS`), max 128 forwards per container (`MAX_FORWARDS_PER_CONTAINER`), max 1024 pending connections (`MAX_PENDING`).
 
 ---

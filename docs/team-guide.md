@@ -22,10 +22,9 @@ This installs the following inside the container:
 
 - `/usr/local/bin/dbr` -- the main binary
 - `/usr/local/bin/dbr-open` -- a hardlink used for browser integration
-- `/usr/local/bin/dbr-start-daemon` -- idempotent daemon starter
 
-The feature declares a `postStartCommand` that starts the container daemon
-on every `devcontainer up`.
+The feature declares an `entrypoint` that starts the container daemon
+on every container start.
 
 The feature does not:
 

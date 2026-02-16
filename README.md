@@ -91,7 +91,7 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 }
 ```
 
-This installs the `dbr` binary and creates the `dbr-open` hardlink. The container daemon starts automatically via the feature's `postStartCommand` — no manual setup required.
+This installs the `dbr` binary and creates the `dbr-open` hardlink. The container daemon starts automatically via the feature's entrypoint — no manual setup required.
 
 ### 3. Configure your personal dotfiles (container side)
 
