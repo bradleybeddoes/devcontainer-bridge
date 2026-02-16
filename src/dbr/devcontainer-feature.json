@@ -1,6 +1,6 @@
 {
   "id": "dbr",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "name": "Development Container Bridge (dbr)",
   "description": "Installs dbr for automatic TCP port forwarding and browser URL opening between devcontainers and the host machine.",
   "documentationURL": "https://github.com/bradleybeddoes/devcontainer-bridge",
