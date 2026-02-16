@@ -577,13 +577,20 @@ fn run_start_daemon() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Use the proven shell daemonization pattern. The sleep 1 is critical:
-    // without it, Docker's exec session teardown kills the backgrounded
-    // process before it fully detaches from the TTY session.
+    // Use a shell one-liner to daemonize.  Two critical details:
+    //
+    // 1. `trap '' HUP` — sets SIGHUP to SIG_IGN in the shell *before*
+    //    the fork for `&`.  The child inherits SIG_IGN, so it survives
+    //    the SIGHUP that the kernel sends when Docker tears down the
+    //    exec session's PTY.  Without this, the child can die before
+    //    nohup even gets to run.
+    //
+    // 2. `sleep 1` — keeps the shell alive long enough for the child
+    //    to be scheduled and start executing.
     match std::process::Command::new("sh")
         .args([
             "-c",
-            "nohup dbr container-daemon --log-level warn >/dev/null 2>&1 & sleep 1",
+            "trap '' HUP; nohup dbr container-daemon --log-level warn >/dev/null 2>&1 & sleep 1",
         ])
         .status()
     {
