@@ -136,6 +136,20 @@ async fn wait_port_open(port: u16, timeout: Duration) {
     }
 }
 
+/// Receive the next non-heartbeat message from a control connection.
+/// Skips any `Ping` messages that arrive between request/response pairs,
+/// which can happen when tests run in parallel and the host daemon's
+/// heartbeat timer fires during the exchange.
+async fn recv_skip_pings(conn: &mut ControlConnection) -> Message {
+    loop {
+        let msg = conn.recv().await.unwrap();
+        if matches!(msg, Message::Ping) {
+            continue;
+        }
+        return msg;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: Register → Forward → ForwardAck → Unforward lifecycle
 // ---------------------------------------------------------------------------
@@ -174,7 +188,7 @@ async fn test_register_forward_unforward_lifecycle() {
     .await
     .unwrap();
 
-    let ack = conn.recv().await.unwrap();
+    let ack = recv_skip_pings(&mut conn).await;
     let host_port = match ack {
         Message::ForwardAck {
             port: 19501,
@@ -248,7 +262,7 @@ async fn test_cleanup_on_container_disconnect() {
     .await
     .unwrap();
 
-    let ack = conn.recv().await.unwrap();
+    let ack = recv_skip_pings(&mut conn).await;
     let host_port = match ack {
         Message::ForwardAck {
             port: 19502,
@@ -350,7 +364,7 @@ async fn test_list_request_response() {
         .await
         .unwrap();
 
-    let ack = container_conn.recv().await.unwrap();
+    let ack = recv_skip_pings(&mut container_conn).await;
     let host_port = match ack {
         Message::ForwardAck {
             success: true,
@@ -421,7 +435,7 @@ async fn test_multi_container_port_conflict() {
         .await
         .unwrap();
 
-    let ack1 = conn1.recv().await.unwrap();
+    let ack1 = recv_skip_pings(&mut conn1).await;
     let host_port_1 = match ack1 {
         Message::ForwardAck {
             success: true,
@@ -443,7 +457,7 @@ async fn test_multi_container_port_conflict() {
         .await
         .unwrap();
 
-    let ack2 = conn2.recv().await.unwrap();
+    let ack2 = recv_skip_pings(&mut conn2).await;
     let host_port_2 = match ack2 {
         Message::ForwardAck {
             success: true,
@@ -662,7 +676,7 @@ async fn test_multiple_forwards_same_container() {
         .await
         .unwrap();
 
-        let ack = conn.recv().await.unwrap();
+        let ack = recv_skip_pings(&mut conn).await;
         match ack {
             Message::ForwardAck {
                 port: p,
@@ -710,7 +724,7 @@ async fn test_multiple_forwards_same_container() {
         let msg = conn.recv().await.unwrap();
         match msg {
             Message::Pong => break,
-            Message::ConnectRequest { .. } => continue, // drain queued connect requests
+            Message::Ping | Message::ConnectRequest { .. } => continue, // drain heartbeats and queued connect requests
             other => panic!("expected Pong or ConnectRequest, got {other:?}"),
         }
     }
@@ -808,7 +822,7 @@ async fn test_container_reconnect_reregister() {
         .await
         .unwrap();
 
-        let ack = conn.recv().await.unwrap();
+        let ack = recv_skip_pings(&mut conn).await;
         assert!(matches!(ack, Message::ForwardAck { success: true, .. }));
 
         // Disconnect
@@ -831,7 +845,7 @@ async fn test_container_reconnect_reregister() {
         .await
         .unwrap();
 
-        let ack = conn.recv().await.unwrap();
+        let ack = recv_skip_pings(&mut conn).await;
         match ack {
             Message::ForwardAck {
                 port: 19505,
