@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO="bradleybeddoes/devcontainer-bridge"
 INSTALL_DIR="/usr/local/bin"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Feature option: version (default "latest")
 VERSION="${VERSION:-latest}"
@@ -102,18 +103,11 @@ cp dbr "${INSTALL_DIR}/dbr"
 echo "Creating dbr-open hardlink..."
 ln -f "${INSTALL_DIR}/dbr" "${INSTALL_DIR}/dbr-open"
 
-echo "Creating dbr-start-daemon wrapper..."
-cat > "${INSTALL_DIR}/dbr-start-daemon" << 'WRAPPER_EOF'
-#!/bin/sh
-# Start the container daemon if not already running.
-# Used by the devcontainer feature postStartCommand to auto-start
-# the daemon on container boot. Safe to call multiple times.
-if ! pgrep -f "dbr container-daemon" >/dev/null 2>&1; then
-  nohup dbr container-daemon --log-level warn >/dev/null 2>&1 &
-fi
-WRAPPER_EOF
-chmod +x "${INSTALL_DIR}/dbr-start-daemon"
+echo "Installing entrypoint script..."
+mkdir -p /usr/local/share/dbr
+cp "${SCRIPT_DIR}/entrypoint.sh" /usr/local/share/dbr/entrypoint.sh
+chmod 0755 /usr/local/share/dbr/entrypoint.sh
 
 echo "Done! dbr ${VERSION} installed to ${INSTALL_DIR}/dbr"
 echo "dbr-open hardlink created at ${INSTALL_DIR}/dbr-open"
-echo "dbr-start-daemon wrapper created at ${INSTALL_DIR}/dbr-start-daemon"
+echo "Entrypoint script installed at /usr/local/share/dbr/entrypoint.sh"

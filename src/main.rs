@@ -8,11 +8,11 @@
 
 mod cli;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use thiserror::Error;
 
@@ -177,7 +177,10 @@ fn main() -> ExitCode {
             json,
         } => {
             init_tracing("warn", "text", None);
-            run_async(run_status(host, control_port, json))
+            run_async(async {
+                let host = resolve_cli_host(host).await;
+                run_status(host, control_port, json).await
+            })
         }
 
         Command::Forward {
@@ -186,7 +189,10 @@ fn main() -> ExitCode {
             host,
         } => {
             init_tracing("warn", "text", None);
-            run_async(run_forward(host, port, control_port))
+            run_async(async {
+                let host = resolve_cli_host(host).await;
+                run_forward(host, port, control_port).await
+            })
         }
 
         Command::Unforward {
@@ -195,7 +201,10 @@ fn main() -> ExitCode {
             host,
         } => {
             init_tracing("warn", "text", None);
-            run_async(run_unforward(host, port, control_port))
+            run_async(async {
+                let host = resolve_cli_host(host).await;
+                run_unforward(host, port, control_port).await
+            })
         }
 
         Command::Ensure {
@@ -204,9 +213,62 @@ fn main() -> ExitCode {
             host,
         } => {
             init_tracing("warn", "text", None);
-            run_async(dbr::host::ensure::run_ensure(host, control_port, data_port))
+            run_async(async {
+                let host = resolve_cli_host(host).await;
+                dbr::host::ensure::run_ensure(host, control_port, data_port).await
+            })
         }
     }
+}
+
+/// Resolve the host daemon address for CLI commands.
+///
+/// Resolution chain (first match wins):
+/// 1. Explicit `--host` flag
+/// 2. `DCBRIDGE_HOST` environment variable
+/// 3. `host.docker.internal` DNS (works inside containers)
+/// 4. `127.0.0.1` (fallback for host-side usage)
+async fn resolve_cli_host(host: Option<String>) -> IpAddr {
+    // 1. Explicit flag
+    if let Some(ref h) = host {
+        if let Ok(ip) = h.parse::<IpAddr>() {
+            return ip;
+        }
+        // Try DNS resolution for hostnames
+        if let Ok(mut addrs) = tokio::net::lookup_host(format!("{h}:0")).await {
+            if let Some(addr) = addrs.next() {
+                return addr.ip();
+            }
+        }
+        // If parsing and DNS both fail, the caller will get a connection
+        // error with an actionable message.
+    }
+
+    // 2. DCBRIDGE_HOST env var
+    if let Ok(env_host) = std::env::var("DCBRIDGE_HOST") {
+        if !env_host.is_empty() {
+            if let Ok(ip) = env_host.parse::<IpAddr>() {
+                return ip;
+            }
+            if let Ok(mut addrs) = tokio::net::lookup_host(format!("{env_host}:0")).await {
+                if let Some(addr) = addrs.next() {
+                    debug!(host = %env_host, resolved = %addr.ip(), "resolved via DCBRIDGE_HOST");
+                    return addr.ip();
+                }
+            }
+        }
+    }
+
+    // 3. host.docker.internal DNS
+    if let Ok(mut addrs) = tokio::net::lookup_host("host.docker.internal:0").await {
+        if let Some(addr) = addrs.next() {
+            debug!(resolved = %addr.ip(), "resolved via host.docker.internal");
+            return addr.ip();
+        }
+    }
+
+    // 4. Fallback
+    IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
 }
 
 /// Connect to the host daemon control port, returning a connection or

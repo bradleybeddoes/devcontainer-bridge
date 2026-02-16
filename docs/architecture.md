@@ -451,7 +451,7 @@ When the host detects EOF on a container's control connection (container stopped
 2. Listener tasks are awaited to ensure ports are freed.
 3. Active proxy connections are drained concurrently with a configurable timeout (default 5 seconds).
 4. The container is removed from state.
-5. If `exit_on_idle` is enabled (default) and no containers remain, the host daemon exits.
+5. If `--exit-on-idle` is enabled and no containers remain, the host daemon exits.
 
 ---
 

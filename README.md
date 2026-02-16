@@ -1,6 +1,6 @@
 # Development Container Bridge (`dbr`)
 
-Automatic port forwarding and browser URL opening between devcontainers and the host machine.
+Automatic port forwarding and browser URL opening between devcontainers and the host machine for CLI users.
 
 This project was initially built as an exploratory collaboration between a @bradleybeddoes and [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams.md). 
 
@@ -91,7 +91,7 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 }
 ```
 
-This installs the `dbr` binary and creates the `dbr-open` hardlink. The container daemon starts automatically when the container boots — no manual setup required.
+This installs the `dbr` binary and creates the `dbr-open` hardlink. The container daemon starts automatically via the feature's entrypoint — no manual setup required.
 
 ### 3. Configure your personal dotfiles (container side)
 
@@ -141,10 +141,10 @@ dbr host-daemon [--bind-addr ADDR] [--no-docker-detect]
                 [--control-port PORT] [--data-port PORT]
                 [--browser-cmd COMMAND]
                 [--log-level LEVEL] [--log-format text|json]
-                [--log-file PATH] [--no-exit-on-idle]
+                [--log-file PATH] [--exit-on-idle]
 ```
 
-By default, the host daemon auto-detects whether to bind to `0.0.0.0` (Docker running) or `127.0.0.1` (no Docker). Use `--bind-addr` to set an explicit address, or `--no-docker-detect` to force loopback. Use `--browser-cmd` to override the default browser command (e.g., `/usr/bin/true` for headless testing). The daemon exits when the last container disconnects unless `--no-exit-on-idle` is set.
+By default, the host daemon auto-detects whether to bind to `0.0.0.0` (Docker running) or `127.0.0.1` (no Docker). Use `--bind-addr` to set an explicit address, or `--no-docker-detect` to force loopback. Use `--browser-cmd` to override the default browser command (e.g., `/usr/bin/true` for headless testing). The daemon stays running after the last container disconnects; pass `--exit-on-idle` to exit instead.
 
 ### Container Daemon
 
@@ -171,29 +171,19 @@ ln -sf /usr/local/bin/dbr-open /usr/local/bin/xdg-open
 
 URLs are rewritten automatically — if container port `3000` is forwarded to host port `3001`, `http://localhost:3000/callback` becomes `http://localhost:3001/callback`.
 
-## Shell Integration Example
+## Shell Integration
 
-Integrate `dbr` into your existing devcontainer workflow aliases:
+Add `dbr ensure` to your container startup workflow so the host daemon is
+running before the container boots:
 
 ```bash
-dcup() {
-  local folder
-  folder=$(_dc_workspace) || return 1
-
-  # Ensure host daemon is running (idempotent)
-  dbr ensure
-
-  echo "Rebuilding: $folder"
-  devcontainer up --workspace-folder "$folder" --remove-existing-container
-
-  local project
-  project=$(_dc_project) || return 1
-  _dc_install_dotfiles "$project"
-
-  # Container daemon starts automatically via the devcontainer feature's
-  # postStartCommand — no manual launch needed.
-}
+# Start host daemon (idempotent), then launch the devcontainer
+dbr ensure
+devcontainer up --workspace-folder "$folder"
 ```
+
+The container daemon starts automatically via the devcontainer feature — no
+manual launch needed.
 
 ## Multi-Container Support
 

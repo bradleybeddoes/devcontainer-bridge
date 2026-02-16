@@ -45,9 +45,8 @@ Add the devcontainer feature to your project's `devcontainer.json`:
 ```
 
 This installs the `dbr` binary at `/usr/local/bin/dbr` and creates the
-`dbr-open` hardlink. The container daemon starts automatically when the
-container boots via the feature's `postStartCommand` lifecycle hook -- no
-manual launch needed.
+`dbr-open` hardlink. The container daemon starts automatically via the
+feature's entrypoint, which runs on every container start.
 
 ### 3. Start the host daemon
 
@@ -63,55 +62,19 @@ inside the container are now automatically forwarded to `localhost` on the host.
 
 ---
 
-## Integrating with `dcup` and `dctmux`
+## Shell Integration
 
-The recommended way to use `dbr` is to integrate it into your existing shell
-functions so it runs transparently.
-
-### `dcup` -- start container with forwarding
-
-Add `dbr ensure` to your `dcup` function. The container daemon starts
-automatically via the devcontainer feature's `postStartCommand`:
+The recommended way to use `dbr` is to add `dbr ensure` to your existing
+container startup shell function so the host daemon starts transparently:
 
 ```bash
-dcup() {
-  local folder
-  folder=$(_dc_workspace) || return 1
-
-  # Ensure host daemon is running (idempotent)
-  dbr ensure
-
-  echo "Rebuilding (cached): $folder"
-  devcontainer up --workspace-folder "$folder" --remove-existing-container
-
-  local project
-  project=$(_dc_project) || return 1
-  _dc_install_dotfiles "$project"
-
-  # Container daemon starts automatically via the devcontainer feature's
-  # postStartCommand — no manual launch needed.
-}
+# Example: add dbr ensure before devcontainer up
+dbr ensure
+devcontainer up --workspace-folder "$folder"
 ```
 
-### `dctmux` -- resume session
-
-The container daemon auto-starts on every container boot via `postStartCommand`,
-so `dctmux` no longer needs a manual recovery check:
-
-```bash
-dctmux() {
-  local project
-  project=$(_dc_project) || return 1
-
-  if [[ $# -gt 0 ]]; then
-    docker compose -p "$project" exec "${_DC_SSH_AGENT_ENV[@]}" app tmux "$@"
-  else
-    local session_name="${project%_devcontainer}"
-    docker compose -p "$project" exec "${_DC_SSH_AGENT_ENV[@]}" app \
-      tmux new-session -A -s "$session_name"
-  fi
-}
-```
+The container daemon starts automatically via the devcontainer feature — no
+manual launch is needed on either `devcontainer up` or `docker compose restart`.
 
 ---
 
@@ -190,6 +153,9 @@ For machine-readable output:
 dbr status --json
 ```
 
+This works from inside containers too — `--host` auto-resolves via
+`DCBRIDGE_HOST` env var, then `host.docker.internal` DNS, then `127.0.0.1`.
+
 If the host daemon is on a non-default port:
 
 ```bash
@@ -226,7 +192,7 @@ Run the host-side daemon. Binds control and data ports on loopback.
 | `--log-level` | info | Log level (trace, debug, info, warn, error) |
 | `--log-format` | text | Log format (text or json) |
 | `--log-file` | -- | Optional file path for log output |
-| `--no-exit-on-idle` | false | Keep running after last container disconnects |
+| `--exit-on-idle` | false | Exit when the last container disconnects |
 
 ### `dbr container-daemon`
 
@@ -249,6 +215,7 @@ Start the host daemon if it is not already running. Safe to call repeatedly.
 |------|---------|-------------|
 | `--control-port` | 19285 | Control channel port |
 | `--data-port` | 19286 | Data channel port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
 
 ### `dbr status`
 
@@ -257,15 +224,26 @@ Show active port forwards across all containers.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--control-port` | 19285 | Host daemon control port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
 | `--json` | false | Output as JSON |
 
 ### `dbr forward <PORT>`
 
 Manually forward a container port.
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--control-port` | 19285 | Host daemon control port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
+
 ### `dbr unforward <PORT>`
 
 Manually remove a port forward.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--control-port` | 19285 | Host daemon control port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
 
 ### `dbr open <URL>`
 
@@ -382,6 +360,27 @@ If the container daemon fails to connect:
    docker compose -p myproject exec app \
      ip route | grep default | awk '{print $3}'
    ```
+
+### Containers with egress firewall rules
+
+If your devcontainer applies iptables egress filtering (e.g., HIPAA/SOC2 compliant
+default-deny policies), you must allow the container daemon to reach the host
+daemon's control and data ports. Only two fixed ports are needed — all forwarded
+ports and browser URLs are tunnelled through these two channels:
+
+```bash
+# Resolve the host IP (host.docker.internal)
+DOCKER_HOST_IP=$(getent hosts host.docker.internal | awk '{print $1}' || true)
+
+if [ -n "$DOCKER_HOST_IP" ]; then
+    iptables -A OUTPUT -d "$DOCKER_HOST_IP" -p tcp --dport 19285:19286 -j ACCEPT
+    iptables -A INPUT -s "$DOCKER_HOST_IP" -p tcp --sport 19285:19286 \
+        -m state --state ESTABLISHED -j ACCEPT
+fi
+```
+
+These rules must be added **before** the default DROP policy. If you use
+non-default ports (`--control-port` / `--data-port`), adjust accordingly.
 
 ### Checking logs
 

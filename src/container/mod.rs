@@ -271,43 +271,10 @@ pub async fn run(
             let _ = tx_term.send(true);
         });
 
-        let tx_hup = internal_tx.clone();
-        tokio::spawn(async move {
-            let mut sighup =
-                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(error = %e, "failed to register SIGHUP handler");
-                        return;
-                    }
-                };
-            sighup.recv().await;
-            info!("received SIGHUP, shutting down");
-            let _ = tx_hup.send(true);
-        });
-    }
-
-    // Monitor parent PID — if it changes to 1 (reparented to init),
-    // the container is shutting down. Poll every 5 seconds.
-    #[cfg(unix)]
-    {
-        let tx_ppid = internal_tx.clone();
-        let initial_ppid = std::os::unix::process::parent_id();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let current_ppid = std::os::unix::process::parent_id();
-                if current_ppid != initial_ppid {
-                    info!(
-                        initial_ppid,
-                        current_ppid, "parent PID changed (reparented), shutting down"
-                    );
-                    let _ = tx_ppid.send(true);
-                    return;
-                }
-            }
-        });
+        // Note: no SIGHUP handler — nohup sets SIGHUP to SIG_IGN and
+        // registering a handler would override that, causing the daemon
+        // to shut down when the launching shell (e.g. entrypoint)
+        // exits. SIGTERM is sufficient for graceful shutdown.
     }
 
     // Drop the original tx so the channel closes when all senders are dropped

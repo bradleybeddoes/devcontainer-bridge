@@ -545,7 +545,7 @@ GitHub Release with auto-generated release notes and attaches all artifacts.
 After the GitHub Release exists, publish the devcontainer feature to GHCR:
 
 1. Go to **Actions** → **Publish Feature** → **Run workflow**
-2. The `devcontainers/action@v1` packages `src/dbr/` as an OCI artifact
+2. The `devcontainers/action@v1` packages `features/dbr/` as an OCI artifact
 3. The feature is published to `ghcr.io/bradleybeddoes/devcontainer-bridge/dbr`
 
 The feature's `install.sh` downloads the correct binary for the container's
@@ -553,7 +553,7 @@ architecture from the GitHub Release at install time.
 
 ### How the feature version works
 
-The feature has its own version in `src/dbr/devcontainer-feature.json` (e.g.,
+The feature has its own version in `features/dbr/devcontainer-feature.json` (e.g.,
 `1.0.0`), which is independent of the binary version (e.g., `v0.1.0`). The
 feature version controls the OCI artifact tag:
 
