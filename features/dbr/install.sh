@@ -104,20 +104,8 @@ ln -f "${INSTALL_DIR}/dbr" "${INSTALL_DIR}/dbr-open"
 
 echo "Installing entrypoint script..."
 mkdir -p /usr/local/share/dbr
-cp /dev/stdin /usr/local/share/dbr/entrypoint.sh <<'ENTRYPOINT'
-#!/bin/sh
-set -e
-
-# Start dbr container daemon in the background (if installed and not already running)
-if command -v dbr >/dev/null 2>&1; then
-  if ! pgrep -f "dbr container-daemon" >/dev/null 2>&1; then
-    nohup dbr container-daemon --log-level warn >/dev/null 2>&1 &
-  fi
-fi
-
-# Pass control to the next entrypoint/command in the chain
-exec "$@"
-ENTRYPOINT
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cp "${SCRIPT_DIR}/entrypoint.sh" /usr/local/share/dbr/entrypoint.sh
 chmod +x /usr/local/share/dbr/entrypoint.sh
 
 echo "Done! dbr ${VERSION} installed to ${INSTALL_DIR}/dbr"
