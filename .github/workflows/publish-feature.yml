@@ -20,6 +20,6 @@ jobs:
           publish-features: "true"
           base-path-to-features: "./features"
           generate-docs: "true"
-          oci-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          devcontainer-cli-version: "0.71.0"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
