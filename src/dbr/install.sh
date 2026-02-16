@@ -102,24 +102,8 @@ cp dbr "${INSTALL_DIR}/dbr"
 echo "Creating dbr-open hardlink..."
 ln -f "${INSTALL_DIR}/dbr" "${INSTALL_DIR}/dbr-open"
 
-echo "Creating dbr-start-daemon wrapper..."
-cat > "${INSTALL_DIR}/dbr-start-daemon" << 'WRAPPER_EOF'
-#!/bin/sh
-# Start the container daemon if not already running.
-# Used by the devcontainer feature postStartCommand to auto-start
-# the daemon on container boot. Safe to call multiple times.
-#
-# The sleep after backgrounding is required: devcontainer CLIs run
-# postStartCommand via `docker exec -t` (with TTY). When the shell
-# exits immediately, Docker tears down the exec session before the
-# daemon has fully forked, killing it. The sleep gives the daemon
-# time to start and detach from the exec session's process group.
-if ! pgrep -f "dbr container-daemon" >/dev/null 2>&1; then
-  nohup dbr container-daemon --log-level warn >/dev/null 2>&1 &
-  sleep 1
-fi
-WRAPPER_EOF
-chmod +x "${INSTALL_DIR}/dbr-start-daemon"
+echo "Creating dbr-start-daemon hardlink..."
+ln -f "${INSTALL_DIR}/dbr" "${INSTALL_DIR}/dbr-start-daemon"
 
 echo "Done! dbr ${VERSION} installed to ${INSTALL_DIR}/dbr"
 echo "dbr-open hardlink created at ${INSTALL_DIR}/dbr-open"
