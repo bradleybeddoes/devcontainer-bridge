@@ -14,9 +14,5 @@
   "entrypoint": "/usr/local/share/dbr/entrypoint.sh",
   "installsAfter": [
     "ghcr.io/devcontainers/features/common-utils"
-  ],
-  "architectures": [
-    "amd64",
-    "arm64"
   ]
 }
