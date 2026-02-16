@@ -106,7 +106,7 @@ echo "Installing entrypoint script..."
 mkdir -p /usr/local/share/dbr
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "${SCRIPT_DIR}/entrypoint.sh" /usr/local/share/dbr/entrypoint.sh
-chmod +x /usr/local/share/dbr/entrypoint.sh
+chmod 0755 /usr/local/share/dbr/entrypoint.sh
 
 echo "Done! dbr ${VERSION} installed to ${INSTALL_DIR}/dbr"
 echo "dbr-open hardlink created at ${INSTALL_DIR}/dbr-open"
