@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO="bradleybeddoes/devcontainer-bridge"
 INSTALL_DIR="/usr/local/bin"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Feature option: version (default "latest")
 VERSION="${VERSION:-latest}"
@@ -104,7 +105,6 @@ ln -f "${INSTALL_DIR}/dbr" "${INSTALL_DIR}/dbr-open"
 
 echo "Installing entrypoint script..."
 mkdir -p /usr/local/share/dbr
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "${SCRIPT_DIR}/entrypoint.sh" /usr/local/share/dbr/entrypoint.sh
 chmod 0755 /usr/local/share/dbr/entrypoint.sh
 
