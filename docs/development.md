@@ -537,8 +537,10 @@ The workflow builds four binaries:
 | `x86_64-apple-darwin` | macOS | x86_64 | Intel Mac host |
 | `aarch64-apple-darwin` | macOS | arm64 | Apple Silicon host |
 
-Each binary has a corresponding `.sha256` checksum file. The workflow creates a
-GitHub Release with auto-generated release notes and attaches all artifacts.
+Each binary has a corresponding `.sha256` checksum file. The workflow also
+includes `scripts/install.sh` (the host install script referenced by README and
+CLI guide). The workflow creates a GitHub Release with auto-generated release
+notes and attaches all artifacts.
 
 ### Step 2: Publish the devcontainer feature
 

@@ -314,3 +314,33 @@ docker exec -d <container> dbr container-daemon
 ```
 
 Or use `scripts/dev-test.sh --skip-build` to re-test with existing binaries after a manual redeploy.
+
+---
+
+## How to release
+
+Releases involve two artifacts: the **dbr binary** (GitHub Releases) and the **devcontainer feature** (GHCR OCI artifact). See [docs/development.md](docs/development.md) for the full guide.
+
+### Quick reference
+
+1. **Tag and push** — the `release.yml` workflow builds binaries, generates checksums, and creates a GitHub Release automatically:
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+   The workflow attaches all four platform binaries, their `.sha256` checksums, and `scripts/install.sh` to the release.
+
+2. **Publish the devcontainer feature** (only if the feature definition changed) — go to **Actions → Publish Feature → Run workflow**.
+
+3. **Verify**:
+   ```bash
+   gh release view vX.Y.Z
+   # Confirm: 4 binaries, 4 .sha256 files, install.sh (9 assets total)
+   ```
+
+### Important: `install.sh` must be a release asset
+
+`scripts/install.sh` is the host install script referenced by README and CLI guide (`curl -fsSL .../releases/latest/download/install.sh | bash`). The release workflow includes it automatically. If creating a release manually, upload it explicitly:
+```bash
+gh release upload vX.Y.Z scripts/install.sh
+```
