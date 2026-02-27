@@ -351,6 +351,12 @@ struct DaemonContext {
     browser: Arc<Mutex<BrowserOpener>>,
     /// Channel that port listeners use to deliver client connections.
     client_tx: mpsc::Sender<ClientConnection>,
+    /// Authentication token required from containers during registration.
+    ///
+    /// When `Some(token)`, the `Register` message must carry a matching
+    /// `auth_token` field. When `None`, authentication is disabled
+    /// (no-auth mode) and any token value is accepted.
+    auth_token: Option<String>,
 }
 
 /// Configuration for the host daemon.
@@ -381,6 +387,11 @@ pub struct HostConfig {
     ///
     /// Useful for testing (e.g. `/usr/bin/true`) or headless environments.
     pub browser_cmd: Option<String>,
+    /// Authentication token required from containers during registration.
+    ///
+    /// When `Some(token)`, every `Register` message must carry a matching
+    /// `auth_token` field. When `None`, authentication is disabled (no-auth mode).
+    pub auth_token: Option<String>,
 }
 
 impl Default for HostConfig {
@@ -393,6 +404,7 @@ impl Default for HostConfig {
             exit_on_idle: false,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             browser_cmd: None,
+            auth_token: None,
         }
     }
 }
@@ -516,6 +528,7 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
             config.browser_cmd.clone(),
         ))),
         client_tx,
+        auth_token: config.auth_token.clone(),
     });
     let drain_timeout = config.drain_timeout;
 
@@ -645,7 +658,7 @@ async fn handle_control_connection(
         Message::Register {
             container_id,
             hostname,
-            auth_token: _,
+            auth_token,
         } => {
             // Validate identifier content and length
             if !is_valid_identifier(&container_id) || !is_valid_identifier(&hostname) {
@@ -657,6 +670,15 @@ async fn handle_control_connection(
                 );
                 conn.send(&Message::RegisterAck { success: false }).await?;
                 return Ok(());
+            }
+
+            // Validate authentication token when auth is enabled
+            if let Some(ref expected) = ctx.auth_token {
+                if auth_token != *expected {
+                    warn!(%addr, "authentication failed: invalid token");
+                    conn.send(&Message::RegisterAck { success: false }).await?;
+                    return Ok(());
+                }
             }
 
             // Enforce container limit and atomically remove stale state if

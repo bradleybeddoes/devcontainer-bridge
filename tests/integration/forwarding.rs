@@ -1009,3 +1009,201 @@ async fn test_proxy_bridge_timeout() {
         "bridge should fail when no data connection arrives"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Helper: create a HostConfig with authentication enabled
+// ---------------------------------------------------------------------------
+
+fn host_config_with_auth(control_port: u16, data_port: u16, token: &str) -> HostConfig {
+    HostConfig {
+        control_port,
+        data_port,
+        exit_on_idle: true,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
+        auth_token: Some(token.to_string()),
+        ..HostConfig::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: Auth success — register with matching token
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_auth_success() {
+    let control_port = find_free_port().await;
+    let data_port = find_free_port().await;
+    let token = "a".repeat(64);
+
+    let config = host_config_with_auth(control_port, data_port, &token);
+    let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+    wait_port_open(control_port, Duration::from_secs(5)).await;
+
+    let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+    let mut conn = control::connect(control_addr).await.unwrap();
+
+    conn.send(&Message::Register {
+        container_id: "auth-ok".to_string(),
+        hostname: "test-host".to_string(),
+        auth_token: token,
+    })
+    .await
+    .unwrap();
+
+    let ack = conn.recv().await.unwrap();
+    assert!(
+        matches!(ack, Message::RegisterAck { success: true }),
+        "expected RegisterAck{{success: true}}, got {ack:?}"
+    );
+
+    drop(conn);
+    let _ = tokio::time::timeout(Duration::from_secs(10), host_handle).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: Auth failure — register with wrong token
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_auth_failure_wrong_token() {
+    let control_port = find_free_port().await;
+    let data_port = find_free_port().await;
+    let token = "a".repeat(64);
+
+    let config = host_config_with_auth(control_port, data_port, &token);
+    let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+    wait_port_open(control_port, Duration::from_secs(5)).await;
+
+    let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+    let mut conn = control::connect(control_addr).await.unwrap();
+
+    conn.send(&Message::Register {
+        container_id: "auth-bad".to_string(),
+        hostname: "test-host".to_string(),
+        auth_token: "b".repeat(64),
+    })
+    .await
+    .unwrap();
+
+    let ack = conn.recv().await.unwrap();
+    assert!(
+        matches!(ack, Message::RegisterAck { success: false }),
+        "expected RegisterAck{{success: false}}, got {ack:?}"
+    );
+
+    drop(conn);
+    host_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: Auth failure — empty token on authenticated host
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_auth_failure_empty_token() {
+    let control_port = find_free_port().await;
+    let data_port = find_free_port().await;
+    let token = "a".repeat(64);
+
+    let config = host_config_with_auth(control_port, data_port, &token);
+    let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+    wait_port_open(control_port, Duration::from_secs(5)).await;
+
+    let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+    let mut conn = control::connect(control_addr).await.unwrap();
+
+    conn.send(&Message::Register {
+        container_id: "auth-empty".to_string(),
+        hostname: "test-host".to_string(),
+        auth_token: String::new(),
+    })
+    .await
+    .unwrap();
+
+    let ack = conn.recv().await.unwrap();
+    assert!(
+        matches!(ack, Message::RegisterAck { success: false }),
+        "expected RegisterAck{{success: false}}, got {ack:?}"
+    );
+
+    drop(conn);
+    host_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Test 17: No-auth mode — register without token succeeds
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_no_auth_mode() {
+    let control_port = find_free_port().await;
+    let data_port = find_free_port().await;
+
+    let config = HostConfig {
+        control_port,
+        data_port,
+        exit_on_idle: true,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
+        auth_token: None,
+        ..HostConfig::default()
+    };
+
+    let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+    wait_port_open(control_port, Duration::from_secs(5)).await;
+
+    let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+    let mut conn = control::connect(control_addr).await.unwrap();
+
+    conn.send(&Message::Register {
+        container_id: "no-auth".to_string(),
+        hostname: "test-host".to_string(),
+        auth_token: String::new(),
+    })
+    .await
+    .unwrap();
+
+    let ack = conn.recv().await.unwrap();
+    assert!(
+        matches!(ack, Message::RegisterAck { success: true }),
+        "expected RegisterAck{{success: true}}, got {ack:?}"
+    );
+
+    drop(conn);
+    let _ = tokio::time::timeout(Duration::from_secs(10), host_handle).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: Ping/Pong without auth — health check works on authenticated host
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_ping_pong_without_auth() {
+    let control_port = find_free_port().await;
+    let data_port = find_free_port().await;
+    let token = "a".repeat(64);
+
+    let config = host_config_with_auth(control_port, data_port, &token);
+    let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+    wait_port_open(control_port, Duration::from_secs(5)).await;
+
+    let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+
+    // Send Ping without registering — should get Pong even with auth enabled
+    let mut conn = control::connect(control_addr).await.unwrap();
+    conn.send(&Message::Ping).await.unwrap();
+
+    let response = conn.recv().await.unwrap();
+    assert_eq!(
+        response,
+        Message::Pong,
+        "should get Pong for standalone Ping on authenticated host"
+    );
+
+    drop(conn);
+    host_handle.abort();
+}

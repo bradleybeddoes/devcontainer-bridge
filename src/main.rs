@@ -88,11 +88,46 @@ fn main() -> ExitCode {
             log_file,
             exit_on_idle,
             browser_cmd,
-            auth_token: _,
-            auth_token_file: _,
-            no_auth: _,
+            auth_token,
+            auth_token_file,
+            no_auth,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
+
+            let resolved_auth_token = if no_auth {
+                eprintln!(
+                    "WARNING: running without authentication. Any process that can \
+                     reach the control port can request forwards."
+                );
+                None
+            } else {
+                let token_file = auth_token_file.as_ref().map(std::path::Path::new);
+                let default_path = match dbr::auth::token_file_path() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("auth error: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+
+                match dbr::auth::resolve_token(auth_token.as_deref(), token_file, &default_path) {
+                    Ok(token) => Some(token),
+                    Err(dbr::auth::AuthError::NoTokenSource { .. }) => {
+                        // No existing token — generate one
+                        match dbr::auth::ensure_token(&default_path) {
+                            Ok(token) => Some(token),
+                            Err(e) => {
+                                eprintln!("auth error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("auth error: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            };
 
             let config = HostConfig {
                 control_port,
@@ -101,6 +136,7 @@ fn main() -> ExitCode {
                 no_docker_detect,
                 exit_on_idle,
                 browser_cmd,
+                auth_token: resolved_auth_token,
                 ..HostConfig::default()
             };
 
