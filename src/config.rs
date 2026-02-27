@@ -75,6 +75,8 @@ struct FileConfig {
     exclude_ports: Option<Vec<u16>>,
     /// Ports to include (allowlist mode).
     include_ports: Option<Vec<u16>>,
+    /// Disable authentication (host daemon only).
+    no_auth: Option<bool>,
 }
 
 /// Runtime configuration for both host and container daemons.
@@ -99,6 +101,8 @@ pub struct Config {
     pub exclude_ports: Vec<u16>,
     /// If non-empty, only forward these ports.
     pub include_ports: Vec<u16>,
+    /// Disable authentication on the host daemon control channel.
+    pub no_auth: bool,
 }
 
 impl Default for Config {
@@ -113,6 +117,7 @@ impl Default for Config {
             log_file: None,
             exclude_ports: Vec::new(),
             include_ports: Vec::new(),
+            no_auth: false,
         }
     }
 }
@@ -232,6 +237,9 @@ fn apply_file_config(config: &mut Config, file: &FileConfig) -> Result<(), Confi
     if let Some(ref v) = file.include_ports {
         config.include_ports.clone_from(v);
     }
+    if let Some(v) = file.no_auth {
+        config.no_auth = v;
+    }
     Ok(())
 }
 
@@ -272,6 +280,7 @@ mod tests {
         assert!(config.log_file.is_none());
         assert!(config.exclude_ports.is_empty());
         assert!(config.include_ports.is_empty());
+        assert!(!config.no_auth);
     }
 
     #[test]
@@ -422,5 +431,25 @@ host_addr = "fromfile"
             matches!(result, Err(ConfigError::ConfigFile(_))),
             "unknown config fields should be rejected"
         );
+    }
+
+    #[test]
+    fn load_no_auth_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "no_auth = true\n").unwrap();
+
+        let config = Config::load(Some(config_path), make_lookup(&[])).unwrap();
+        assert!(config.no_auth);
+    }
+
+    #[test]
+    fn no_auth_defaults_to_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "control_port = 19300\n").unwrap();
+
+        let config = Config::load(Some(config_path), make_lookup(&[])).unwrap();
+        assert!(!config.no_auth);
     }
 }

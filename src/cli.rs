@@ -80,6 +80,21 @@ pub enum Command {
         /// accept all OpenUrl requests without actually opening a browser.
         #[arg(long)]
         browser_cmd: Option<String>,
+
+        /// Authentication token for the control channel.
+        ///
+        /// If not provided, the token is read from ~/.config/dbr/auth-token
+        /// (generated automatically on first run).
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
+
+        /// Disable authentication (deprecated; allows unauthenticated access).
+        #[arg(long)]
+        no_auth: bool,
     },
 
     /// Run the container-side daemon (inside a devcontainer).
@@ -108,6 +123,14 @@ pub enum Command {
         /// Optional log file path.
         #[arg(long)]
         log_file: Option<String>,
+
+        /// Authentication token for the control channel.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
     },
 
     /// Show active port forwards across all containers.
@@ -127,6 +150,14 @@ pub enum Command {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+
+        /// Authentication token for the control channel.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
     },
 
     /// Manually forward a container port.
@@ -145,6 +176,14 @@ pub enum Command {
         /// then host.docker.internal DNS, then 127.0.0.1.
         #[arg(long)]
         host: Option<String>,
+
+        /// Authentication token for the control channel.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
     },
 
     /// Manually remove a port forward.
@@ -163,6 +202,14 @@ pub enum Command {
         /// then host.docker.internal DNS, then 127.0.0.1.
         #[arg(long)]
         host: Option<String>,
+
+        /// Authentication token for the control channel.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
     },
 
     /// Open a URL in the host browser via the host daemon.
@@ -197,6 +244,14 @@ BROWSER INTEGRATION:
         /// Host daemon control port.
         #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
         control_port: u16,
+
+        /// Authentication token for the control channel.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
     },
 
     /// Start the host daemon if it is not already running.
@@ -216,5 +271,17 @@ BROWSER INTEGRATION:
         /// then host.docker.internal DNS, then 127.0.0.1.
         #[arg(long)]
         host: Option<String>,
+
+        /// Authentication token for the control channel.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
+
+        /// Disable authentication when spawning a new daemon.
+        #[arg(long)]
+        no_auth: bool,
     },
 }

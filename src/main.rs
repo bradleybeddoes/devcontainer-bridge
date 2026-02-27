@@ -88,6 +88,9 @@ fn main() -> ExitCode {
             log_file,
             exit_on_idle,
             browser_cmd,
+            auth_token: _,
+            auth_token_file: _,
+            no_auth: _,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
 
@@ -121,6 +124,8 @@ fn main() -> ExitCode {
             log_level,
             log_format,
             log_file,
+            auth_token: _,
+            auth_token_file: _,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
 
@@ -166,7 +171,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
 
-        Command::Open { url, control_port } => {
+        Command::Open {
+            url,
+            control_port,
+            auth_token: _,
+            auth_token_file: _,
+        } => {
             init_tracing("warn", "text", None);
             run_async(browser::open_url(&url, control_port))
         }
@@ -175,6 +185,8 @@ fn main() -> ExitCode {
             control_port,
             host,
             json,
+            auth_token: _,
+            auth_token_file: _,
         } => {
             init_tracing("warn", "text", None);
             run_async(async {
@@ -187,6 +199,8 @@ fn main() -> ExitCode {
             port,
             control_port,
             host,
+            auth_token: _,
+            auth_token_file: _,
         } => {
             init_tracing("warn", "text", None);
             run_async(async {
@@ -199,6 +213,8 @@ fn main() -> ExitCode {
             port,
             control_port,
             host,
+            auth_token: _,
+            auth_token_file: _,
         } => {
             init_tracing("warn", "text", None);
             run_async(async {
@@ -211,6 +227,9 @@ fn main() -> ExitCode {
             control_port,
             data_port,
             host,
+            auth_token: _,
+            auth_token_file: _,
+            no_auth: _,
         } => {
             init_tracing("warn", "text", None);
             run_async(async {
