@@ -135,6 +135,10 @@ pub enum Message {
         container_id: String,
         /// Human-readable hostname.
         hostname: String,
+        /// Authentication token. Empty string when no token is provided
+        /// (e.g., old clients that predate authentication support).
+        #[serde(default)]
+        auth_token: String,
     },
 
     /// Host acknowledges a container registration.
@@ -251,12 +255,45 @@ mod tests {
         let msg = Message::Register {
             container_id: "abc123".into(),
             hostname: "dev".into(),
+            auth_token: "a".repeat(64),
         };
         let json = serialize_message(&msg).unwrap();
         assert!(json.contains(r#""type":"Register""#));
         assert!(json.contains(r#""container_id":"abc123""#));
+        assert!(json.contains(r#""auth_token""#));
         let decoded = deserialize_message(&json).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn roundtrip_register_empty_token() {
+        let msg = Message::Register {
+            container_id: "abc123".into(),
+            hostname: "dev".into(),
+            auth_token: String::new(),
+        };
+        let json = serialize_message(&msg).unwrap();
+        let decoded = deserialize_message(&json).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn register_without_auth_token_deserializes_with_default() {
+        // Simulates an old client that doesn't send auth_token
+        let json = r#"{"type":"Register","container_id":"old","hostname":"legacy"}"#;
+        let msg = deserialize_message(json).unwrap();
+        match msg {
+            Message::Register {
+                container_id,
+                hostname,
+                auth_token,
+            } => {
+                assert_eq!(container_id, "old");
+                assert_eq!(hostname, "legacy");
+                assert_eq!(auth_token, ""); // default empty string
+            }
+            _ => panic!("expected Register"),
+        }
     }
 
     #[test]

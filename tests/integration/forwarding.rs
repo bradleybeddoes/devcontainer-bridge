@@ -80,6 +80,7 @@ async fn register_container(
     conn.send(&Message::Register {
         container_id: container_id.to_string(),
         hostname: hostname.to_string(),
+        auth_token: String::new(),
     })
     .await
     .unwrap();

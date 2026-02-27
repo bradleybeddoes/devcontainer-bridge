@@ -645,6 +645,7 @@ async fn handle_control_connection(
         Message::Register {
             container_id,
             hostname,
+            auth_token: _,
         } => {
             // Validate identifier content and length
             if !is_valid_identifier(&container_id) || !is_valid_identifier(&hostname) {

@@ -291,6 +291,7 @@ async fn register_cli_client(conn: &mut ControlConnection) -> Result<(), CliErro
     conn.send(&Message::Register {
         container_id: "cli-manual".to_string(),
         hostname: "cli".to_string(),
+        auth_token: String::new(),
     })
     .await?;
 

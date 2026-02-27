@@ -338,6 +338,7 @@ pub async fn run(
             .send(&Message::Register {
                 container_id: container_id.clone(),
                 hostname: container_id.clone(),
+                auth_token: String::new(),
             })
             .await
         {

@@ -309,6 +309,7 @@ mod tests {
             Message::Register {
                 container_id: "c1".into(),
                 hostname: "dev".into(),
+                auth_token: String::new(),
             },
             Message::RegisterAck { success: true },
         ];
