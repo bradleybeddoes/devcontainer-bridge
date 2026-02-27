@@ -26,6 +26,9 @@ pub enum ProtocolError {
 /// Maximum allowed URL length in characters for [`Message::OpenUrl`].
 pub const MAX_URL_LENGTH: usize = 2048;
 
+/// Maximum allowed socket path length in characters.
+pub const MAX_SOCKET_PATH_LENGTH: usize = 4096;
+
 /// Errors from URL validation for [`Message::OpenUrl`].
 #[derive(Debug, Error)]
 pub enum UrlValidationError {
@@ -224,6 +227,42 @@ pub enum Message {
     ListResponse {
         /// All currently active port forwards across all containers.
         forwards: Vec<ForwardInfo>,
+    },
+
+    /// Host tells a container to create a mirror of a host-side Unix socket.
+    ///
+    /// The container should create a `UnixListener` at `container_path` and
+    /// forward connections back to the host via `SocketConnectRequest`.
+    #[cfg(unix)]
+    SocketForward {
+        /// Unique identifier for this socket forward.
+        socket_id: String,
+        /// Absolute path of the socket on the host.
+        host_path: String,
+        /// Absolute path where the mirror socket should be created in the container.
+        container_path: String,
+    },
+
+    /// Host tells a container that a previously forwarded socket is gone.
+    ///
+    /// The container should stop listening and remove the mirror socket file.
+    #[cfg(unix)]
+    SocketUnforward {
+        /// The socket forward identifier from the original [`Message::SocketForward`].
+        socket_id: String,
+    },
+
+    /// Container tells the host that a client connected to a mirror socket.
+    ///
+    /// The host should connect to the original Unix socket and prepare for
+    /// a reverse data connection (reuses `ConnectReady`/`ConnectFailed` on
+    /// the data channel, keyed by `conn_id`).
+    #[cfg(unix)]
+    SocketConnectRequest {
+        /// The socket forward identifier.
+        socket_id: String,
+        /// Unique connection identifier (UUID).
+        conn_id: String,
     },
 }
 
@@ -577,5 +616,51 @@ mod tests {
         let url = format!("http://x.co/{}", "a".repeat(MAX_URL_LENGTH - 12));
         assert_eq!(url.len(), MAX_URL_LENGTH);
         assert!(validate_open_url(&url).is_ok());
+    }
+
+    // --- Socket forwarding message tests ---
+
+    #[cfg(unix)]
+    #[test]
+    fn roundtrip_socket_forward() {
+        let msg = Message::SocketForward {
+            socket_id: "sock-1234".into(),
+            host_path: "/tmp/claude-mcp-browser-bridge-user/12345.sock".into(),
+            container_path: "/tmp/claude-mcp-browser-bridge-vscode/12345.sock".into(),
+        };
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains(r#""type":"SocketForward""#));
+        assert!(json.contains(r#""socket_id":"sock-1234""#));
+        assert!(json.contains(r#""host_path""#));
+        assert!(json.contains(r#""container_path""#));
+        let decoded = deserialize_message(&json).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roundtrip_socket_unforward() {
+        let msg = Message::SocketUnforward {
+            socket_id: "sock-1234".into(),
+        };
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains(r#""type":"SocketUnforward""#));
+        let decoded = deserialize_message(&json).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roundtrip_socket_connect_request() {
+        let msg = Message::SocketConnectRequest {
+            socket_id: "sock-1234".into(),
+            conn_id: "conn-uuid-5678".into(),
+        };
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains(r#""type":"SocketConnectRequest""#));
+        assert!(json.contains(r#""socket_id":"sock-1234""#));
+        assert!(json.contains(r#""conn_id":"conn-uuid-5678""#));
+        let decoded = deserialize_message(&json).unwrap();
+        assert_eq!(msg, decoded);
     }
 }
