@@ -65,12 +65,16 @@ pub enum BrowserError {
 ///
 /// * `url` — The URL to open (must be `http://` or `https://`, max 2048 chars).
 /// * `control_port` — The host daemon's control channel port.
+/// * `auth_token` — Authentication token for the control channel. Currently
+///   reserved for future use (OpenUrl does not require registration).
 ///
 /// # Errors
 ///
 /// Returns [`BrowserError`] if the URL is invalid, the host daemon is
 /// unreachable, or the host daemon fails to open the URL.
-pub async fn open_url(url: &str, control_port: u16) -> Result<(), BrowserError> {
+pub async fn open_url(url: &str, control_port: u16, auth_token: &str) -> Result<(), BrowserError> {
+    // OpenUrl is sent without registration; token reserved for future use.
+    let _ = auth_token;
     protocol::validate_open_url(url)?;
 
     let config = Config::from_env().map_err(|e| BrowserError::HostResolution(e.to_string()))?;
@@ -109,10 +113,10 @@ mod tests {
     #[tokio::test]
     async fn open_url_validates_before_connecting() {
         // Should fail validation without ever trying to connect
-        let result = open_url("ftp://bad", 19285).await;
+        let result = open_url("ftp://bad", 19285, "").await;
         assert!(matches!(result, Err(BrowserError::Validation(_))));
 
-        let result = open_url("", 19285).await;
+        let result = open_url("", 19285, "").await;
         assert!(matches!(result, Err(BrowserError::Validation(_))));
     }
 
@@ -121,7 +125,7 @@ mod tests {
         // Use a high port unlikely to be in use. Depending on the environment,
         // this may fail with Connect (host resolved but port closed) or
         // HostResolution (host.docker.internal not available).
-        let result = open_url("https://example.com", 19199).await;
+        let result = open_url("https://example.com", 19199, "").await;
         assert!(
             matches!(
                 result,

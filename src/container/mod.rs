@@ -109,6 +109,12 @@ pub enum ContainerError {
     #[error("filter error: {0}")]
     Filter(#[from] filter::FilterError),
 
+    /// Authentication failed — the host daemon rejected the auth token.
+    ///
+    /// This is a permanent error; retrying with the same token will not help.
+    #[error("authentication failed: host daemon rejected the auth token")]
+    AuthenticationFailed,
+
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -230,14 +236,17 @@ fn get_container_id() -> String {
 /// # Arguments
 ///
 /// * `config` — Runtime configuration (host address, ports, scan interval, etc.)
+/// * `auth_token` — Authentication token to send in the Register message.
+///   Empty string if no token is available (host may be running with `--no-auth`).
 /// * `shutdown` — A future that resolves when the daemon should shut down.
 ///
 /// # Errors
 ///
 /// Returns [`ContainerError`] on fatal errors (host resolution failure,
-/// unrecoverable control channel errors).
+/// unrecoverable control channel errors, authentication failure).
 pub async fn run(
     config: Config,
+    auth_token: String,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), ContainerError> {
     // Set up an internal shutdown channel that merges external shutdown
@@ -338,7 +347,7 @@ pub async fn run(
             .send(&Message::Register {
                 container_id: container_id.clone(),
                 hostname: container_id.clone(),
-                auth_token: String::new(),
+                auth_token: auth_token.clone(),
             })
             .await
         {
@@ -355,11 +364,12 @@ pub async fn run(
                 info!("registered successfully");
             }
             Ok(Message::RegisterAck { success: false }) => {
-                error!("registration rejected by host");
-                if backoff.wait_or_shutdown(&mut shutdown).await {
-                    return Ok(());
-                }
-                continue;
+                error!(
+                    "registration rejected by host (authentication failure). \
+                     Check that the auth token matches the host daemon's token. \
+                     Retrying will not help — exiting."
+                );
+                return Err(ContainerError::AuthenticationFailed);
             }
             Ok(other) => {
                 warn!(?other, "unexpected message, expected RegisterAck");

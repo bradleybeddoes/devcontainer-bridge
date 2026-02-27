@@ -160,8 +160,8 @@ fn main() -> ExitCode {
             log_level,
             log_format,
             log_file,
-            auth_token: _,
-            auth_token_file: _,
+            auth_token,
+            auth_token_file,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
 
@@ -182,6 +182,50 @@ fn main() -> ExitCode {
                 config.exclude_ports = exclude_ports;
             }
 
+            // Resolve auth token: CLI flag > CLI file > env var > env file >
+            // container fallback (/run/secrets/dbr-auth-token) > default config path
+            let resolved_token = {
+                let token_file = auth_token_file.as_ref().map(std::path::Path::new);
+                let container_fallback =
+                    std::path::Path::new(dbr::auth::DEFAULT_CONTAINER_TOKEN_PATH);
+                let default_path = dbr::auth::token_file_path().ok();
+
+                // Try the standard resolution chain first
+                match dbr::auth::resolve_token(
+                    auth_token.as_deref(),
+                    token_file,
+                    container_fallback,
+                ) {
+                    Ok(token) => token,
+                    Err(dbr::auth::AuthError::NoTokenSource { .. })
+                    | Err(dbr::auth::AuthError::TokenNotFound { .. }) => {
+                        // Container fallback not found — try default config path
+                        if let Some(ref dp) = default_path {
+                            match dbr::auth::resolve_token(None, None, dp) {
+                                Ok(token) => token,
+                                Err(_) => {
+                                    info!(
+                                        "no auth token found; connecting without authentication \
+                                         (host may require --no-auth)"
+                                    );
+                                    String::new()
+                                }
+                            }
+                        } else {
+                            info!(
+                                "no auth token found; connecting without authentication \
+                                 (host may require --no-auth)"
+                            );
+                            String::new()
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("auth error: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            };
+
             let rt = match build_runtime() {
                 Ok(rt) => rt,
                 Err(code) => return code,
@@ -199,7 +243,7 @@ fn main() -> ExitCode {
                 let _ = shutdown_tx.send(true);
             });
 
-            if let Err(e) = rt.block_on(dbr::container::run(config, shutdown_rx)) {
+            if let Err(e) = rt.block_on(dbr::container::run(config, resolved_token, shutdown_rx)) {
                 error!(error = %e, "container daemon failed");
                 return ExitCode::FAILURE;
             }
@@ -210,24 +254,26 @@ fn main() -> ExitCode {
         Command::Open {
             url,
             control_port,
-            auth_token: _,
-            auth_token_file: _,
+            auth_token,
+            auth_token_file,
         } => {
             init_tracing("warn", "text", None);
-            run_async(browser::open_url(&url, control_port))
+            let token = resolve_cli_auth_token(&auth_token, &auth_token_file);
+            run_async(browser::open_url(&url, control_port, &token))
         }
 
         Command::Status {
             control_port,
             host,
             json,
-            auth_token: _,
-            auth_token_file: _,
+            auth_token,
+            auth_token_file,
         } => {
             init_tracing("warn", "text", None);
+            let token = resolve_cli_auth_token(&auth_token, &auth_token_file);
             run_async(async {
                 let host = resolve_cli_host(host).await;
-                run_status(host, control_port, json).await
+                run_status(host, control_port, json, &token).await
             })
         }
 
@@ -235,13 +281,14 @@ fn main() -> ExitCode {
             port,
             control_port,
             host,
-            auth_token: _,
-            auth_token_file: _,
+            auth_token,
+            auth_token_file,
         } => {
             init_tracing("warn", "text", None);
+            let token = resolve_cli_auth_token(&auth_token, &auth_token_file);
             run_async(async {
                 let host = resolve_cli_host(host).await;
-                run_forward(host, port, control_port).await
+                run_forward(host, port, control_port, &token).await
             })
         }
 
@@ -249,13 +296,14 @@ fn main() -> ExitCode {
             port,
             control_port,
             host,
-            auth_token: _,
-            auth_token_file: _,
+            auth_token,
+            auth_token_file,
         } => {
             init_tracing("warn", "text", None);
+            let token = resolve_cli_auth_token(&auth_token, &auth_token_file);
             run_async(async {
                 let host = resolve_cli_host(host).await;
-                run_unforward(host, port, control_port).await
+                run_unforward(host, port, control_port, &token).await
             })
         }
 
@@ -274,6 +322,24 @@ fn main() -> ExitCode {
             })
         }
     }
+}
+
+/// Resolve an auth token for CLI commands (host-side).
+///
+/// Resolution chain: `--auth-token` flag > `--auth-token-file` flag >
+/// `DCBRIDGE_AUTH_TOKEN` env > `DCBRIDGE_AUTH_TOKEN_FILE` env >
+/// `~/.config/dbr/auth-token` default file.
+///
+/// Returns an empty string if no token is found (allows connecting to
+/// `--no-auth` host daemons without requiring a token).
+fn resolve_cli_auth_token(auth_token: &Option<String>, auth_token_file: &Option<String>) -> String {
+    let token_file = auth_token_file.as_ref().map(std::path::Path::new);
+    let default_path = match dbr::auth::token_file_path() {
+        Ok(p) => p,
+        Err(_) => return String::new(),
+    };
+
+    dbr::auth::resolve_token(auth_token.as_deref(), token_file, &default_path).unwrap_or_default()
 }
 
 /// Resolve the host daemon address for CLI commands.
@@ -342,11 +408,20 @@ async fn connect_to_host(
 }
 
 /// Register as a manual CLI client, returning an error on failure.
-async fn register_cli_client(conn: &mut ControlConnection) -> Result<(), CliError> {
+///
+/// # Arguments
+///
+/// * `conn` — The control channel connection.
+/// * `auth_token` — Authentication token to include in the Register message.
+///   Empty string if no token is available (host may be running with `--no-auth`).
+async fn register_cli_client(
+    conn: &mut ControlConnection,
+    auth_token: &str,
+) -> Result<(), CliError> {
     conn.send(&Message::Register {
         container_id: "cli-manual".to_string(),
         hostname: "cli".to_string(),
-        auth_token: String::new(),
+        auth_token: auth_token.to_string(),
     })
     .await?;
 
@@ -360,11 +435,20 @@ async fn register_cli_client(conn: &mut ControlConnection) -> Result<(), CliErro
 ///
 /// If `json` is true, outputs the response as JSON. Otherwise, displays a
 /// human-readable table.
-async fn run_status(host: std::net::IpAddr, control_port: u16, json: bool) -> Result<(), CliError> {
+async fn run_status(
+    host: std::net::IpAddr,
+    control_port: u16,
+    json: bool,
+    auth_token: &str,
+) -> Result<(), CliError> {
     let mut conn = connect_to_host(host, control_port)
         .await
         .map_err(CliError::Connection)?;
 
+    // Status uses ListRequest which doesn't require registration,
+    // but send auth token for future-proofing when auth is enforced
+    // on all connections.
+    let _ = auth_token; // reserved for future use
     conn.send(&Message::ListRequest).await?;
 
     match conn.recv().await? {
@@ -433,11 +517,16 @@ fn format_since(since: &str) -> String {
 ///
 /// Keeps the connection alive until Ctrl-C so the forward persists.
 /// On exit, sends an `Unforward` to clean up.
-async fn run_forward(host: std::net::IpAddr, port: u16, control_port: u16) -> Result<(), CliError> {
+async fn run_forward(
+    host: std::net::IpAddr,
+    port: u16,
+    control_port: u16,
+    auth_token: &str,
+) -> Result<(), CliError> {
     let mut conn = connect_to_host(host, control_port)
         .await
         .map_err(CliError::Connection)?;
-    register_cli_client(&mut conn).await?;
+    register_cli_client(&mut conn, auth_token).await?;
 
     conn.send(&Message::Forward {
         port,
@@ -511,11 +600,15 @@ async fn run_unforward(
     host: std::net::IpAddr,
     port: u16,
     control_port: u16,
+    auth_token: &str,
 ) -> Result<(), CliError> {
     let mut conn = connect_to_host(host, control_port)
         .await
         .map_err(CliError::Connection)?;
 
+    // Unforward is a one-shot administrative command that doesn't
+    // require registration, but we include the token for future use.
+    let _ = auth_token; // reserved for future use
     conn.send(&Message::Unforward { port }).await?;
     println!("Unforward request sent for port {port}");
     Ok(())
@@ -555,7 +648,9 @@ fn run_dbr_open() -> ExitCode {
 
     init_tracing("warn", "text", None);
     let config = Config::from_env().unwrap_or_default();
-    run_async(browser::open_url(&url, config.control_port))
+    // dbr-open hardlink mode: resolve token from env/files (no CLI flags available)
+    let token = resolve_cli_auth_token(&None, &None);
+    run_async(browser::open_url(&url, config.control_port, &token))
 }
 
 /// Initialize the tracing subscriber with the given log level, format, and optional file.
