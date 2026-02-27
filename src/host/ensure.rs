@@ -69,6 +69,16 @@ pub enum EnsureError {
 /// mitigates this — a non-dbr service will not respond with `Pong`,
 /// causing the check to fail with [`EnsureError::PortConflict`].
 ///
+/// # Auth parameters
+///
+/// When spawning a new daemon, the auth flags are forwarded to `dbr host-daemon`:
+/// - `no_auth` → `--no-auth`
+/// - `auth_token` → `--auth-token <TOKEN>`
+/// - `auth_token_file` → `--auth-token-file <PATH>`
+///
+/// The Ping/Pong health check does not require authentication, so these
+/// parameters only affect the newly spawned daemon.
+///
 /// # Errors
 ///
 /// Returns [`EnsureError`] if the daemon cannot be started or verified.
@@ -76,6 +86,9 @@ pub async fn run_ensure(
     host: IpAddr,
     control_port: u16,
     data_port: u16,
+    no_auth: bool,
+    auth_token: Option<String>,
+    auth_token_file: Option<String>,
 ) -> Result<(), EnsureError> {
     let addr: SocketAddr = (host, control_port).into();
 
@@ -106,12 +119,23 @@ pub async fn run_ensure(
     // Use std::process::Command so the child is fully detached.
     // tokio::process::Command installs a SIGCHLD reaper that warns
     // when the Child handle is dropped without calling .wait().
-    let child = std::process::Command::new(&exe)
-        .arg("host-daemon")
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("host-daemon")
         .arg("--control-port")
         .arg(control_port.to_string())
         .arg("--data-port")
-        .arg(data_port.to_string())
+        .arg(data_port.to_string());
+
+    // Forward auth flags to the spawned daemon
+    if no_auth {
+        cmd.arg("--no-auth");
+    } else if let Some(ref token) = auth_token {
+        cmd.arg("--auth-token").arg(token);
+    } else if let Some(ref path) = auth_token_file {
+        cmd.arg("--auth-token-file").arg(path);
+    }
+
+    let child = cmd
         .arg("--log-file")
         .arg(&log_path)
         .stdin(std::process::Stdio::null())

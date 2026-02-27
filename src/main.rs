@@ -311,14 +311,22 @@ fn main() -> ExitCode {
             control_port,
             data_port,
             host,
-            auth_token: _,
-            auth_token_file: _,
-            no_auth: _,
+            auth_token,
+            auth_token_file,
+            no_auth,
         } => {
             init_tracing("warn", "text", None);
             run_async(async {
                 let host = resolve_cli_host(host).await;
-                dbr::host::ensure::run_ensure(host, control_port, data_port).await
+                dbr::host::ensure::run_ensure(
+                    host,
+                    control_port,
+                    data_port,
+                    no_auth,
+                    auth_token,
+                    auth_token_file,
+                )
+                .await
             })
         }
     }
