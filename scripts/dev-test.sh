@@ -33,6 +33,10 @@ SCAN_WAIT=3          # seconds to wait for port scan detection
 FORWARD_WAIT=5       # seconds to wait for port forwarding to appear in status
 REGISTER_WAIT=3      # seconds to wait for container registration
 
+# Generate a test auth token
+TEST_AUTH_TOKEN=$(openssl rand -hex 32)
+log_info "Generated test auth token: ${TEST_AUTH_TOKEN:0:8}..."
+
 # ---------------------------------------------------------------------------
 # Color output helpers
 # ---------------------------------------------------------------------------
@@ -175,7 +179,7 @@ wait_for_port() {
 # Check if a string appears in dbr status output
 status_contains() {
     local pattern=$1
-    "$HOST_BINARY" status 2>/dev/null | grep -q "$pattern"
+    "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" 2>/dev/null | grep -q "$pattern"
 }
 
 # Wait for a pattern to appear in dbr status output
@@ -374,6 +378,7 @@ log_info "Starting host daemon with --browser-cmd /usr/bin/true..."
 "$HOST_BINARY" host-daemon \
     --control-port "$CONTROL_PORT" \
     --data-port "$DATA_PORT" \
+    --auth-token "$TEST_AUTH_TOKEN" \
     --browser-cmd /usr/bin/true \
     --exit-on-idle \
     --log-level debug \
@@ -391,7 +396,7 @@ else
 fi
 
 # Verify status works
-if "$HOST_BINARY" status >/dev/null 2>&1; then
+if "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" >/dev/null 2>&1; then
     log_pass "dbr status works (host daemon responding)"
 else
     log_fail "dbr status failed"
@@ -406,20 +411,20 @@ log_phase "Test Phase: Container Daemons"
 log_info "Starting container daemon in $TEST_CONTAINER_NAME..."
 
 # Start container daemon in background
-docker exec -d "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" container-daemon 2>&1
+docker exec -d -e DCBRIDGE_AUTH_TOKEN="$TEST_AUTH_TOKEN" "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" container-daemon 2>&1
 
 # Give it a moment to register
 sleep "$REGISTER_WAIT"
 
 # Verify registration via status
 # The hostname should appear in status output
-if "$HOST_BINARY" status 2>/dev/null | grep -qi "container\|forward\|port" || \
-   "$HOST_BINARY" status --json 2>/dev/null | grep -q "container_id"; then
+if "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" 2>/dev/null | grep -qi "container\|forward\|port" || \
+   "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" --json 2>/dev/null | grep -q "container_id"; then
     log_pass "Container $TEST_CONTAINER_NAME appears registered (status shows data)"
 else
     # Even "No active forwards" is okay -- it means the daemon connected
     # but nothing is listening yet
-    local_status=$("$HOST_BINARY" status 2>&1 || true)
+    local_status=$("$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" 2>&1 || true)
     if echo "$local_status" | grep -qi "no active forwards"; then
         log_pass "Container $TEST_CONTAINER_NAME registered (no active forwards yet)"
     else
@@ -472,12 +477,12 @@ else
     # Check status to show what we see
     log_fail "Port $TEST_PORT did not appear in dbr status within ${FORWARD_WAIT}s"
     log_info "  Current status:"
-    "$HOST_BINARY" status 2>&1 | sed 's/^/    /' || true
+    "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" 2>&1 | sed 's/^/    /' || true
 fi
 
 # Validate dbr status --json output structure
 log_info "Validating 'dbr status --json' output..."
-status_json=$("$HOST_BINARY" status --json 2>/dev/null || echo "[]")
+status_json=$("$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" --json 2>/dev/null || echo "[]")
 json_valid=$(echo "$status_json" | python3 -c "
 import sys, json
 try:
@@ -567,7 +572,7 @@ if wait_for_status_gone "$TEST_PORT" "$FORWARD_WAIT"; then
 else
     log_fail "Port $TEST_PORT still appears in status after listener stopped"
     log_info "  Current status:"
-    "$HOST_BINARY" status 2>&1 | sed 's/^/    /' || true
+    "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" 2>&1 | sed 's/^/    /' || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -583,7 +588,7 @@ log_phase "Test Phase: Browser Opening (OpenUrl)"
 
 # Test 1: dbr open with a valid https URL — should succeed (exit 0)
 log_info "Testing 'dbr open https://example.com' from container..."
-open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "https://example.com" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec -e DCBRIDGE_AUTH_TOKEN="$TEST_AUTH_TOKEN" "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "https://example.com" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -eq 0 ]]; then
     log_pass "dbr open https URL succeeded (exit 0, full OpenUrl→OpenUrlAck round-trip)"
 else
@@ -593,7 +598,7 @@ fi
 
 # Test 2: dbr open with a valid http URL — should succeed (exit 0)
 log_info "Testing 'dbr open http://localhost:8080/callback' from container..."
-open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "http://localhost:8080/callback" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec -e DCBRIDGE_AUTH_TOKEN="$TEST_AUTH_TOKEN" "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "http://localhost:8080/callback" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -eq 0 ]]; then
     log_pass "dbr open http URL succeeded (exit 0, full OpenUrl→OpenUrlAck round-trip)"
 else
@@ -603,7 +608,7 @@ fi
 
 # Test 3: dbr open with an invalid scheme — must fail (non-zero exit)
 log_info "Testing 'dbr open ftp://bad' from container (should fail)..."
-open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "ftp://bad" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec -e DCBRIDGE_AUTH_TOKEN="$TEST_AUTH_TOKEN" "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "ftp://bad" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -ne 0 ]]; then
     log_pass "dbr open correctly rejected ftp:// URL (exit $open_rc)"
 else
@@ -612,7 +617,7 @@ fi
 
 # Test 4: dbr open with an empty URL — must fail (non-zero exit)
 log_info "Testing 'dbr open \"\"' from container (should fail)..."
-open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec -e DCBRIDGE_AUTH_TOKEN="$TEST_AUTH_TOKEN" "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -ne 0 ]]; then
     log_pass "dbr open correctly rejected empty URL (exit $open_rc)"
 else
@@ -621,7 +626,7 @@ fi
 
 # Test 5: dbr open with javascript: scheme — must fail (non-zero exit)
 log_info "Testing 'dbr open javascript:alert(1)' from container (should fail)..."
-open_out=$(docker exec "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "javascript:alert(1)" 2>&1) && open_rc=0 || open_rc=$?
+open_out=$(docker exec -e DCBRIDGE_AUTH_TOKEN="$TEST_AUTH_TOKEN" "$TEST_CONTAINER_NAME" "$CONTAINER_BINARY_PATH" open "javascript:alert(1)" 2>&1) && open_rc=0 || open_rc=$?
 if [[ $open_rc -ne 0 ]]; then
     log_pass "dbr open correctly rejected javascript: URL (exit $open_rc)"
 else
@@ -636,7 +641,7 @@ log_phase "Test Phase: Idempotency"
 
 # dbr ensure should detect the already-running daemon via Ping/Pong
 log_info "Running 'dbr ensure' (should detect running daemon)..."
-ensure_out=$("$HOST_BINARY" ensure 2>&1) && ensure_rc=0 || ensure_rc=$?
+ensure_out=$("$HOST_BINARY" ensure --auth-token "$TEST_AUTH_TOKEN" 2>&1) && ensure_rc=0 || ensure_rc=$?
 if [[ $ensure_rc -eq 0 ]]; then
     if echo "$ensure_out" | grep -qi "already running"; then
         log_pass "dbr ensure detected running daemon ('already running')"
@@ -649,10 +654,24 @@ else
 fi
 
 # Verify status still works after ensure
-if "$HOST_BINARY" status >/dev/null 2>&1; then
+if "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" >/dev/null 2>&1; then
     log_pass "dbr status still works after ensure"
 else
     log_fail "dbr status broken after ensure"
+fi
+
+# ---------------------------------------------------------------------------
+# Test phase: Auth rejection
+# ---------------------------------------------------------------------------
+
+log_phase "Test Phase: Auth Rejection"
+
+# Test: auth failure with wrong token
+log_info "Testing auth rejection with wrong token..."
+if "$HOST_BINARY" status --auth-token "wrongtoken$(openssl rand -hex 28)" --control-port "$CONTROL_PORT" 2>/dev/null; then
+    log_fail "status with wrong token should have failed"
+else
+    log_pass "Auth rejection works correctly"
 fi
 
 # ---------------------------------------------------------------------------
