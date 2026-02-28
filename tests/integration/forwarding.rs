@@ -1207,3 +1207,251 @@ async fn test_ping_pong_without_auth() {
     drop(conn);
     host_handle.abort();
 }
+
+// ---------------------------------------------------------------------------
+// Socket scanner integration tests (Unix only)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+mod socket_scanner_tests {
+    use super::*;
+    use dbr::config::SocketForwardingConfig;
+    use std::os::unix::net::UnixListener as StdUnixListener;
+
+    /// Create a Unix socket in the given directory with the given name.
+    fn create_unix_socket(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let _listener = StdUnixListener::bind(&path).expect("failed to bind Unix socket");
+        // Drop the listener — the socket file remains on disk.
+        path
+    }
+
+    /// Create a HostConfig with socket scanning enabled for the given directory.
+    fn host_config_with_socket_scanning(
+        control_port: u16,
+        data_port: u16,
+        watch_dir: &std::path::Path,
+        scan_interval_ms: u64,
+    ) -> HostConfig {
+        HostConfig {
+            control_port,
+            data_port,
+            exit_on_idle: false,
+            bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
+            socket_forwarding: SocketForwardingConfig {
+                enabled: true,
+                watch_paths: vec![format!("{}/*", watch_dir.display())],
+                container_path_prefix: Some("/run/host-sockets".to_string()),
+                scan_interval_ms,
+                max_socket_forwards: 16,
+            },
+            ..HostConfig::default()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 19: Socket scanner discovers socket and sends SocketForward
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_socket_scanner_sends_forward_on_discovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        // Create socket before starting the daemon
+        let _sock_path = create_unix_socket(tmp.path(), "test.sock");
+
+        let config = host_config_with_socket_scanning(control_port, data_port, tmp.path(), 100);
+
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+        let mut conn = register_container(control_addr, "socket-test-1", "test-host").await;
+
+        // Wait for the scanner to detect the socket and send SocketForward.
+        // The scanner runs every 100ms, so we should receive it within a few seconds.
+        let msg = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward { .. } => return msg,
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("should receive SocketForward within timeout");
+
+        match msg {
+            Message::SocketForward {
+                socket_id,
+                host_path,
+                container_path,
+            } => {
+                assert!(!socket_id.is_empty(), "socket_id should not be empty");
+                assert!(
+                    host_path.contains("test.sock"),
+                    "host_path should contain the socket filename"
+                );
+                assert_eq!(
+                    container_path, "/run/host-sockets/test.sock",
+                    "container_path should use the configured prefix"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        drop(conn);
+        host_handle.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 20: Socket scanner sends SocketUnforward when socket is removed
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_socket_scanner_sends_unforward_on_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        // Create socket before starting daemon
+        let sock_path = create_unix_socket(tmp.path(), "removable.sock");
+
+        let config = host_config_with_socket_scanning(control_port, data_port, tmp.path(), 100);
+
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+        let mut conn = register_container(control_addr, "socket-test-2", "test-host").await;
+
+        // Wait for the SocketForward first
+        let forward_socket_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward { socket_id, .. } => return socket_id,
+                    other => panic!("unexpected message waiting for SocketForward: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("should receive SocketForward within timeout");
+
+        // Remove the socket file
+        std::fs::remove_file(&sock_path).unwrap();
+
+        // Wait for SocketUnforward
+        let unforward_socket_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketUnforward { socket_id } => return socket_id,
+                    other => panic!("unexpected message waiting for SocketUnforward: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("should receive SocketUnforward within timeout");
+
+        assert_eq!(
+            forward_socket_id, unforward_socket_id,
+            "SocketUnforward should reference the same socket_id as SocketForward"
+        );
+
+        drop(conn);
+        host_handle.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 21: New container receives existing socket forwards on registration
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_new_container_receives_existing_socket_forwards() {
+        let tmp = tempfile::tempdir().unwrap();
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        // Create socket before starting daemon
+        let _sock_path = create_unix_socket(tmp.path(), "existing.sock");
+
+        let config = host_config_with_socket_scanning(control_port, data_port, tmp.path(), 100);
+
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+
+        // Register first container and wait for the socket to be discovered
+        let mut conn1 = register_container(control_addr, "socket-test-3a", "test-host-a").await;
+
+        let _first_socket_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn1.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn1.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward { socket_id, .. } => return socket_id,
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("first container should receive SocketForward");
+
+        // Now register a second container — it should receive the existing
+        // socket forward immediately on registration.
+        let mut conn2 = register_container(control_addr, "socket-test-3b", "test-host-b").await;
+
+        let msg = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn2.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn2.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward { .. } => return msg,
+                    other => panic!("unexpected message for second container: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("second container should receive existing SocketForward");
+
+        match msg {
+            Message::SocketForward { container_path, .. } => {
+                assert_eq!(
+                    container_path, "/run/host-sockets/existing.sock",
+                    "second container should get the same socket forward"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        drop(conn1);
+        drop(conn2);
+        host_handle.abort();
+    }
+}

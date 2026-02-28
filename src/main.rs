@@ -16,7 +16,7 @@ use tracing::{debug, error, info};
 
 use thiserror::Error;
 
-use dbr::config::Config;
+use dbr::config::{Config, SocketForwardingConfig};
 use dbr::container::browser;
 use dbr::control::{self, ControlConnection, ControlError};
 use dbr::host::HostConfig;
@@ -91,10 +91,10 @@ fn main() -> ExitCode {
             auth_token,
             auth_token_file,
             no_auth,
-            socket_watch_paths: _socket_watch_paths,
-            socket_container_path_prefix: _socket_container_path_prefix,
-            socket_scan_interval_ms: _socket_scan_interval_ms,
-            no_socket_forwarding: _no_socket_forwarding,
+            socket_watch_paths,
+            socket_container_path_prefix,
+            socket_scan_interval_ms,
+            no_socket_forwarding,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
 
@@ -133,6 +133,28 @@ fn main() -> ExitCode {
                 }
             };
 
+            // Build socket forwarding config: CLI flags override config file
+            let loaded_config = Config::from_env().unwrap_or_default();
+            let socket_forwarding = if no_socket_forwarding {
+                SocketForwardingConfig {
+                    enabled: false,
+                    ..SocketForwardingConfig::default()
+                }
+            } else {
+                let mut sf = loaded_config.socket_forwarding.clone();
+                if !socket_watch_paths.is_empty() {
+                    sf.watch_paths = socket_watch_paths;
+                    sf.enabled = true;
+                }
+                if let Some(prefix) = socket_container_path_prefix {
+                    sf.container_path_prefix = Some(prefix);
+                }
+                if let Some(interval) = socket_scan_interval_ms {
+                    sf.scan_interval_ms = interval;
+                }
+                sf
+            };
+
             let config = HostConfig {
                 control_port,
                 data_port,
@@ -141,6 +163,7 @@ fn main() -> ExitCode {
                 exit_on_idle,
                 browser_cmd,
                 auth_token: resolved_auth_token,
+                socket_forwarding,
                 ..HostConfig::default()
             };
 

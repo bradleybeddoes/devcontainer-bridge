@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use crate::config::SocketForwardingConfig;
 use crate::control::{self, ControlConnection, ControlError, ControlListener};
 use crate::protocol::{ForwardInfo, Message, Protocol};
 
@@ -264,6 +265,9 @@ struct ContainerState {
     forwards: HashMap<u16, ForwardState>,
     /// Channel to send ConnectRequests to this container's control connection.
     connect_request_tx: mpsc::Sender<OutboundConnectRequest>,
+    /// Channel to send general-purpose messages (e.g. SocketForward/SocketUnforward)
+    /// to this container's control connection handler.
+    outbound_msg_tx: mpsc::Sender<Message>,
 }
 
 /// Top-level mutable state for the host daemon, protected by a `Mutex`.
@@ -276,6 +280,9 @@ struct HostState {
     containers: HashMap<String, ContainerState>,
     /// Set of host ports currently in use (for conflict resolution).
     used_host_ports: HashMap<u16, String>,
+    /// Active socket forwards known by the scanner, keyed by socket_id.
+    #[cfg(unix)]
+    socket_forwards: HashMap<String, socket_scanner::SocketInfo>,
 }
 
 impl HostState {
@@ -283,6 +290,8 @@ impl HostState {
         Self {
             containers: HashMap::new(),
             used_host_ports: HashMap::new(),
+            #[cfg(unix)]
+            socket_forwards: HashMap::new(),
         }
     }
 
@@ -394,6 +403,8 @@ pub struct HostConfig {
     /// When `Some(token)`, every `Register` message must carry a matching
     /// `auth_token` field. When `None`, authentication is disabled (no-auth mode).
     pub auth_token: Option<String>,
+    /// Socket forwarding configuration.
+    pub socket_forwarding: SocketForwardingConfig,
 }
 
 impl Default for HostConfig {
@@ -407,6 +418,7 @@ impl Default for HostConfig {
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             browser_cmd: None,
             auth_token: None,
+            socket_forwarding: SocketForwardingConfig::default(),
         }
     }
 }
@@ -533,6 +545,31 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
         auth_token: config.auth_token.clone(),
     });
     let drain_timeout = config.drain_timeout;
+
+    // Spawn socket scanner task if configured (Unix only)
+    #[cfg(unix)]
+    let _socket_scanner_handle = {
+        let sf = &config.socket_forwarding;
+        if sf.enabled && !sf.watch_paths.is_empty() {
+            let scanner_ctx = Arc::clone(&ctx);
+            let watch_paths = sf.watch_paths.clone();
+            let container_path_prefix = sf.container_path_prefix.clone();
+            let max_socket_forwards = sf.max_socket_forwards;
+            let scan_interval_ms = sf.scan_interval_ms;
+            Some(tokio::spawn(async move {
+                run_socket_scanner(
+                    scanner_ctx,
+                    watch_paths,
+                    container_path_prefix,
+                    max_socket_forwards,
+                    scan_interval_ms,
+                )
+                .await;
+            }))
+        } else {
+            None
+        }
+    };
 
     // Channel to signal daemon shutdown
     let (daemon_shutdown_tx, mut daemon_shutdown_rx) = mpsc::channel::<()>(1);
@@ -744,6 +781,9 @@ async fn handle_control_connection(
             // Create channel for outbound ConnectRequests to this container
             let (connect_req_tx, connect_req_rx) = mpsc::channel::<OutboundConnectRequest>(64);
 
+            // Create channel for general outbound messages (socket forwards, etc.)
+            let (outbound_msg_tx, outbound_msg_rx) = mpsc::channel::<Message>(64);
+
             // Register in state with a unique epoch ID
             let reg_id = NEXT_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
             {
@@ -755,14 +795,42 @@ async fn handle_control_connection(
                         hostname,
                         forwards: HashMap::new(),
                         connect_request_tx: connect_req_tx,
+                        outbound_msg_tx,
                     },
                 );
             }
 
+            // Send existing socket forwards to the newly registered container
+            #[cfg(unix)]
+            {
+                let state = ctx.state.lock().await;
+                for info in state.socket_forwards.values() {
+                    let msg = Message::SocketForward {
+                        socket_id: info.socket_id.clone(),
+                        host_path: info.host_path.to_string_lossy().into_owned(),
+                        container_path: info.container_path.clone(),
+                    };
+                    if let Err(e) = conn.send(&msg).await {
+                        warn!(
+                            container_id,
+                            socket_id = %info.socket_id,
+                            error = %e,
+                            "failed to send existing socket forward to new container"
+                        );
+                    }
+                }
+            }
+
             // Process messages from this container until disconnect
-            let result =
-                handle_container_messages(&mut conn, &container_id, reg_id, ctx, connect_req_rx)
-                    .await;
+            let result = handle_container_messages(
+                &mut conn,
+                &container_id,
+                reg_id,
+                ctx,
+                connect_req_rx,
+                outbound_msg_rx,
+            )
+            .await;
 
             // Clean up on disconnect — only if this registration still owns
             // the state. cleanup_container verifies the registration_id
@@ -833,14 +901,16 @@ async fn handle_control_connection(
 ///
 /// Sends periodic heartbeat pings and disconnects if the container
 /// fails to respond within [`MAX_MISSED_PONGS`] intervals.
-/// Also forwards ConnectRequests from client connection handlers to the
-/// container via its control connection.
+/// Also forwards ConnectRequests from client connection handlers and
+/// general outbound messages (e.g. socket forwards) to the container
+/// via its control connection.
 async fn handle_container_messages(
     conn: &mut ControlConnection,
     container_id: &str,
     registration_id: u64,
     ctx: &DaemonContext,
     mut connect_req_rx: mpsc::Receiver<OutboundConnectRequest>,
+    mut outbound_msg_rx: mpsc::Receiver<Message>,
 ) -> Result<(), ControlError> {
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await; // consume the immediate first tick
@@ -867,6 +937,14 @@ async fn handle_container_messages(
                 }).await {
                     warn!(container_id, conn_id = req.conn_id, error = %e, "failed to send ConnectRequest");
                     proxy::cancel_pending(&ctx.pending, &req.conn_id).await;
+                }
+            }
+
+            // Forward general outbound messages (socket forwards, etc.)
+            Some(outbound_msg) = outbound_msg_rx.recv() => {
+                debug!(container_id, msg = ?outbound_msg, "sending outbound message to container");
+                if let Err(e) = conn.send(&outbound_msg).await {
+                    warn!(container_id, error = %e, "failed to send outbound message");
                 }
             }
 
@@ -1312,6 +1390,91 @@ async fn drain_forward_connections(tracker: &ConnectionTracker, port: u16, timeo
                 "drain timeout expired, force-closing remaining connections"
             );
             tracker.cancel();
+        }
+    }
+}
+
+/// Run the socket scanner loop, broadcasting discoveries to all containers.
+///
+/// Periodically scans configured glob patterns for Unix domain sockets,
+/// adds/removes them from `HostState::socket_forwards`, and sends
+/// `SocketForward`/`SocketUnforward` messages to all connected containers.
+#[cfg(unix)]
+async fn run_socket_scanner(
+    ctx: Arc<DaemonContext>,
+    watch_paths: Vec<String>,
+    container_path_prefix: Option<String>,
+    max_socket_forwards: usize,
+    scan_interval_ms: u64,
+) {
+    let mut scanner =
+        socket_scanner::SocketScanner::new(watch_paths, container_path_prefix, max_socket_forwards);
+    let mut interval = tokio::time::interval(Duration::from_millis(scan_interval_ms));
+
+    info!("socket scanner started");
+
+    loop {
+        interval.tick().await;
+
+        let (new_sockets, removed_sockets) = scanner.scan();
+
+        if !new_sockets.is_empty() || !removed_sockets.is_empty() {
+            let mut state = ctx.state.lock().await;
+
+            // Collect outbound message senders while holding the lock
+            let senders: Vec<mpsc::Sender<Message>> = state
+                .containers
+                .values()
+                .map(|c| c.outbound_msg_tx.clone())
+                .collect();
+
+            // Process new sockets
+            for info in &new_sockets {
+                info!(
+                    socket_id = %info.socket_id,
+                    host_path = %info.host_path.display(),
+                    container_path = %info.container_path,
+                    "socket discovered"
+                );
+                state
+                    .socket_forwards
+                    .insert(info.socket_id.clone(), info.clone());
+            }
+
+            // Process removed sockets
+            for info in &removed_sockets {
+                info!(
+                    socket_id = %info.socket_id,
+                    host_path = %info.host_path.display(),
+                    "socket removed"
+                );
+                state.socket_forwards.remove(&info.socket_id);
+            }
+
+            // Drop the lock before sending messages (sending may await)
+            drop(state);
+
+            // Broadcast SocketForward messages for new sockets
+            for info in &new_sockets {
+                let msg = Message::SocketForward {
+                    socket_id: info.socket_id.clone(),
+                    host_path: info.host_path.to_string_lossy().into_owned(),
+                    container_path: info.container_path.clone(),
+                };
+                for tx in &senders {
+                    let _ = tx.try_send(msg.clone());
+                }
+            }
+
+            // Broadcast SocketUnforward messages for removed sockets
+            for info in &removed_sockets {
+                let msg = Message::SocketUnforward {
+                    socket_id: info.socket_id.clone(),
+                };
+                for tx in &senders {
+                    let _ = tx.try_send(msg.clone());
+                }
+            }
         }
     }
 }
