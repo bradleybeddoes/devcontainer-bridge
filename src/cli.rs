@@ -95,6 +95,22 @@ pub enum Command {
         /// Disable authentication (deprecated; allows unauthenticated access).
         #[arg(long)]
         no_auth: bool,
+
+        /// Glob patterns for host Unix sockets to forward into containers.
+        #[arg(long, value_delimiter = ',')]
+        socket_watch_paths: Vec<String>,
+
+        /// Prefix to rewrite container socket paths.
+        #[arg(long)]
+        socket_container_path_prefix: Option<String>,
+
+        /// Socket scan interval in milliseconds.
+        #[arg(long)]
+        socket_scan_interval_ms: Option<u64>,
+
+        /// Disable socket forwarding explicitly.
+        #[arg(long)]
+        no_socket_forwarding: bool,
     },
 
     /// Run the container-side daemon (inside a devcontainer).

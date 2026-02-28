@@ -27,6 +27,40 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 /// Default log format.
 pub const DEFAULT_LOG_FORMAT: &str = "text";
 
+/// Default scan interval for socket discovery in milliseconds.
+pub const DEFAULT_SOCKET_SCAN_INTERVAL_MS: u64 = 2000;
+
+/// Default maximum number of socket forwards.
+pub const DEFAULT_MAX_SOCKET_FORWARDS: usize = 16;
+
+/// Configuration for Unix socket forwarding (host → container).
+#[derive(Debug, Clone)]
+pub struct SocketForwardingConfig {
+    /// Whether socket forwarding is enabled.
+    pub enabled: bool,
+    /// Glob patterns for host socket paths to watch.
+    pub watch_paths: Vec<String>,
+    /// Optional prefix to rewrite container paths.
+    /// If set, the directory portion of the host path is replaced with this prefix.
+    pub container_path_prefix: Option<String>,
+    /// Scan interval for socket discovery in milliseconds.
+    pub scan_interval_ms: u64,
+    /// Maximum number of socket forwards.
+    pub max_socket_forwards: usize,
+}
+
+impl Default for SocketForwardingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            watch_paths: Vec::new(),
+            container_path_prefix: None,
+            scan_interval_ms: DEFAULT_SOCKET_SCAN_INTERVAL_MS,
+            max_socket_forwards: DEFAULT_MAX_SOCKET_FORWARDS,
+        }
+    }
+}
+
 /// Errors that can occur when loading configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -49,6 +83,24 @@ pub enum ConfigError {
     /// Failed to read or parse the config file.
     #[error("config file error: {0}")]
     ConfigFile(String),
+}
+
+/// TOML config file structure for the `[socket_forwarding]` section.
+///
+/// All fields are optional; missing fields retain their default values.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileSocketForwardingConfig {
+    /// Whether socket forwarding is enabled.
+    enabled: Option<bool>,
+    /// Glob patterns for host socket paths to watch.
+    watch_paths: Option<Vec<String>>,
+    /// Optional prefix to rewrite container paths.
+    container_path_prefix: Option<String>,
+    /// Scan interval for socket discovery in milliseconds.
+    scan_interval_ms: Option<u64>,
+    /// Maximum number of socket forwards.
+    max_socket_forwards: Option<usize>,
 }
 
 /// TOML config file structure at `~/.config/dbr/config.toml`.
@@ -77,6 +129,8 @@ struct FileConfig {
     include_ports: Option<Vec<u16>>,
     /// Disable authentication (host daemon only).
     no_auth: Option<bool>,
+    /// Socket forwarding configuration.
+    socket_forwarding: Option<FileSocketForwardingConfig>,
 }
 
 /// Runtime configuration for both host and container daemons.
@@ -103,6 +157,8 @@ pub struct Config {
     pub include_ports: Vec<u16>,
     /// Disable authentication on the host daemon control channel.
     pub no_auth: bool,
+    /// Socket forwarding configuration.
+    pub socket_forwarding: SocketForwardingConfig,
 }
 
 impl Default for Config {
@@ -118,6 +174,7 @@ impl Default for Config {
             exclude_ports: Vec::new(),
             include_ports: Vec::new(),
             no_auth: false,
+            socket_forwarding: SocketForwardingConfig::default(),
         }
     }
 }
@@ -239,6 +296,26 @@ fn apply_file_config(config: &mut Config, file: &FileConfig) -> Result<(), Confi
     }
     if let Some(v) = file.no_auth {
         config.no_auth = v;
+    }
+    if let Some(ref sf) = file.socket_forwarding {
+        if let Some(v) = sf.enabled {
+            config.socket_forwarding.enabled = v;
+        }
+        if let Some(ref v) = sf.watch_paths {
+            config.socket_forwarding.watch_paths.clone_from(v);
+        }
+        if sf.container_path_prefix.is_some() {
+            config
+                .socket_forwarding
+                .container_path_prefix
+                .clone_from(&sf.container_path_prefix);
+        }
+        if let Some(v) = sf.scan_interval_ms {
+            config.socket_forwarding.scan_interval_ms = v;
+        }
+        if let Some(v) = sf.max_socket_forwards {
+            config.socket_forwarding.max_socket_forwards = v;
+        }
     }
     Ok(())
 }
@@ -451,5 +528,79 @@ host_addr = "fromfile"
 
         let config = Config::load(Some(config_path), make_lookup(&[])).unwrap();
         assert!(!config.no_auth);
+    }
+
+    #[test]
+    fn default_socket_forwarding_config() {
+        let config = Config::default();
+        assert!(!config.socket_forwarding.enabled);
+        assert!(config.socket_forwarding.watch_paths.is_empty());
+        assert!(config.socket_forwarding.container_path_prefix.is_none());
+        assert_eq!(
+            config.socket_forwarding.scan_interval_ms,
+            DEFAULT_SOCKET_SCAN_INTERVAL_MS
+        );
+        assert_eq!(
+            config.socket_forwarding.max_socket_forwards,
+            DEFAULT_MAX_SOCKET_FORWARDS
+        );
+    }
+
+    #[test]
+    fn load_socket_forwarding_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[socket_forwarding]
+enabled = true
+watch_paths = ["/tmp/*.sock", "/run/**/*.socket"]
+container_path_prefix = "/host-sockets"
+scan_interval_ms = 5000
+max_socket_forwards = 32
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(config_path), make_lookup(&[])).unwrap();
+        assert!(config.socket_forwarding.enabled);
+        assert_eq!(
+            config.socket_forwarding.watch_paths,
+            vec!["/tmp/*.sock", "/run/**/*.socket"]
+        );
+        assert_eq!(
+            config.socket_forwarding.container_path_prefix.as_deref(),
+            Some("/host-sockets")
+        );
+        assert_eq!(config.socket_forwarding.scan_interval_ms, 5000);
+        assert_eq!(config.socket_forwarding.max_socket_forwards, 32);
+    }
+
+    #[test]
+    fn partial_socket_forwarding_leaves_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[socket_forwarding]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(config_path), make_lookup(&[])).unwrap();
+        assert!(config.socket_forwarding.enabled);
+        assert!(config.socket_forwarding.watch_paths.is_empty());
+        assert!(config.socket_forwarding.container_path_prefix.is_none());
+        assert_eq!(
+            config.socket_forwarding.scan_interval_ms,
+            DEFAULT_SOCKET_SCAN_INTERVAL_MS
+        );
+        assert_eq!(
+            config.socket_forwarding.max_socket_forwards,
+            DEFAULT_MAX_SOCKET_FORWARDS
+        );
     }
 }

@@ -91,6 +91,10 @@ fn main() -> ExitCode {
             auth_token,
             auth_token_file,
             no_auth,
+            socket_watch_paths: _socket_watch_paths,
+            socket_container_path_prefix: _socket_container_path_prefix,
+            socket_scan_interval_ms: _socket_scan_interval_ms,
+            no_socket_forwarding: _no_socket_forwarding,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
 
