@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::io::{copy_bidirectional, AsyncWriteExt};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
@@ -159,12 +159,15 @@ pub async fn cancel_pending(pending: &PendingConnections, conn_id: &str) {
 /// # Errors
 ///
 /// Returns [`ProxyError`] on timeout or I/O failure.
-pub async fn bridge_connection(
+pub async fn bridge_connection<S>(
     conn_id: String,
-    mut client_stream: TcpStream,
+    mut client_stream: S,
     data_rx: oneshot::Receiver<DataStream>,
     pending: &PendingConnections,
-) -> Result<(u64, u64), ProxyError> {
+) -> Result<(u64, u64), ProxyError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let data_stream = tokio::time::timeout(CONNECT_TIMEOUT, data_rx).await;
 
     match data_stream {
@@ -340,5 +343,49 @@ mod tests {
 
         // Either our outer timeout or the inner 10s timeout will fire
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn bridge_connection_works_with_duplex_stream() {
+        let pending = new_pending_connections();
+        let conn_id = "duplex-test".to_string();
+
+        let data_rx = register_pending(&pending, conn_id.clone()).await.unwrap();
+
+        // Use tokio::io::duplex as the client stream (proves generic works)
+        let (client_stream, mut client_local) = tokio::io::duplex(4096);
+
+        // Set up a data pair via TCP (data channel is always TCP)
+        let (data_stream, mut data_local) = tcp_pair().await;
+
+        let data = DataStream {
+            stream: data_stream,
+            buffered: Vec::new(),
+        };
+        assert!(resolve_pending(&pending, &conn_id, data).await);
+
+        let bridge_pending = pending.clone();
+        let bridge_conn_id = conn_id.clone();
+        let bridge_handle = tokio::spawn(async move {
+            bridge_connection(bridge_conn_id, client_stream, data_rx, &bridge_pending).await
+        });
+
+        // Write from duplex client side -> should appear on TCP data side
+        client_local.write_all(b"from duplex").await.unwrap();
+        let mut buf = [0u8; 11];
+        data_local.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"from duplex");
+
+        // Write from TCP data side -> should appear on duplex client side
+        data_local.write_all(b"from tcp data").await.unwrap();
+        let mut buf = [0u8; 13];
+        client_local.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"from tcp data");
+
+        drop(client_local);
+        drop(data_local);
+
+        let result = bridge_handle.await.unwrap();
+        assert!(result.is_ok());
     }
 }
