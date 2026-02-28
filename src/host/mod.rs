@@ -10,6 +10,8 @@ pub mod browser;
 pub mod ensure;
 pub mod listener;
 pub mod proxy;
+#[cfg(unix)]
+pub mod socket_scanner;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
