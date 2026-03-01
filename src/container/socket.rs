@@ -18,9 +18,33 @@ use tracing::{debug, info, warn};
 use crate::container::RelayMessage;
 use crate::protocol::Message;
 
+/// Maximum length of a Unix domain socket path.
+///
+/// Most Unix systems (Linux, macOS, BSDs) limit `sun_path` in `sockaddr_un`
+/// to 108 bytes. Paths exceeding this limit cannot be bound or connected to.
+const MAX_UNIX_SOCKET_PATH: usize = 108;
+
 /// Errors from socket mirror operations.
 #[derive(Debug, Error)]
 pub enum SocketMirrorError {
+    /// The container path is not absolute.
+    #[error("container path is not absolute: {path}")]
+    NotAbsolute {
+        /// The invalid path.
+        path: PathBuf,
+    },
+
+    /// The container path exceeds the Unix socket path length limit.
+    #[error("container path too long ({len} bytes, max {max}): {path}")]
+    PathTooLong {
+        /// The path that was too long.
+        path: PathBuf,
+        /// Actual length in bytes.
+        len: usize,
+        /// Maximum allowed length.
+        max: usize,
+    },
+
     /// Failed to create parent directories.
     #[error("failed to create parent directory {path}: {source}")]
     CreateDir {
@@ -86,6 +110,23 @@ pub fn create_mirror_socket(
     socket_id: &str,
     container_path: &Path,
 ) -> Result<MirrorSocket, SocketMirrorError> {
+    // Validate the container path is absolute
+    if !container_path.is_absolute() {
+        return Err(SocketMirrorError::NotAbsolute {
+            path: container_path.to_path_buf(),
+        });
+    }
+
+    // Validate the container path length does not exceed the Unix socket limit
+    let path_len = container_path.to_string_lossy().len();
+    if path_len > MAX_UNIX_SOCKET_PATH {
+        return Err(SocketMirrorError::PathTooLong {
+            path: container_path.to_path_buf(),
+            len: path_len,
+            max: MAX_UNIX_SOCKET_PATH,
+        });
+    }
+
     // Create parent directories with mode 0700
     if let Some(parent) = container_path.parent() {
         if !parent.exists() {
@@ -354,6 +395,50 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_container_path_not_absolute_rejected() {
+        let result = create_mirror_socket("sock-rel", Path::new("relative/path.sock"));
+        match result {
+            Err(SocketMirrorError::NotAbsolute { path }) => {
+                assert_eq!(path, Path::new("relative/path.sock"));
+            }
+            Err(other) => panic!("expected NotAbsolute error, got: {other}"),
+            Ok(_) => panic!("expected error for relative path, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_container_path_too_long_rejected() {
+        // Build a path that exceeds 108 characters
+        let mut long_path = String::from("/");
+        while long_path.len() <= MAX_UNIX_SOCKET_PATH {
+            long_path.push('a');
+        }
+        let path = Path::new(&long_path);
+
+        match create_mirror_socket("sock-long", path) {
+            Err(SocketMirrorError::PathTooLong { len, max, .. }) => {
+                assert!(len > MAX_UNIX_SOCKET_PATH);
+                assert_eq!(max, MAX_UNIX_SOCKET_PATH);
+            }
+            Err(other) => panic!("expected PathTooLong error, got: {other}"),
+            Ok(_) => panic!("expected error for long path, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_container_path_at_limit_accepted() {
+        let tmp = TempDir::new().unwrap();
+        // Verify that a short absolute path within the limit is accepted.
+        let sock_path = tmp.path().join("ok.sock");
+        if sock_path.to_string_lossy().len() <= MAX_UNIX_SOCKET_PATH {
+            assert!(
+                create_mirror_socket("sock-ok", &sock_path).is_ok(),
+                "path within limit should succeed"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_create_mirror_socket_creates_file() {

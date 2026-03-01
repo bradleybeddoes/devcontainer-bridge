@@ -1129,8 +1129,14 @@ async fn dispatch_container_message(
 
         #[cfg(unix)]
         Message::SocketConnectRequest { socket_id, conn_id } => {
+            // Validate socket_id format (same rules as container identifiers)
+            if !is_valid_identifier(&socket_id) {
+                warn!(container_id, %socket_id, "invalid socket_id in SocketConnectRequest");
+                return Ok(false);
+            }
+
             // Validate conn_id format
-            if conn_id.is_empty() || conn_id.len() > MAX_CONN_ID_LENGTH {
+            if !is_valid_identifier(&conn_id) {
                 warn!(container_id, %conn_id, "invalid conn_id in SocketConnectRequest");
                 return Ok(false);
             }

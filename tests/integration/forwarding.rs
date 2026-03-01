@@ -1868,4 +1868,155 @@ mod socket_scanner_tests {
         drop(container_conn);
         host_handle.abort();
     }
+
+    // -----------------------------------------------------------------------
+    // Test 25: SocketConnectRequest with invalid socket_id is rejected
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_socket_connect_request_invalid_socket_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        // Create a socket so scanner has something to discover
+        let _sock_path = create_unix_socket(tmp.path(), "valid.sock");
+
+        let config = host_config_with_socket_scanning(control_port, data_port, tmp.path(), 100);
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+        let mut conn = register_container(control_addr, "invalid-sid-test", "test-host").await;
+
+        // Wait for SocketForward so we know the daemon is ready
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward { .. } => return,
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("should receive SocketForward within timeout");
+
+        // Send SocketConnectRequest with invalid socket_id (contains spaces/special chars)
+        conn.send(&Message::SocketConnectRequest {
+            socket_id: "invalid socket id!@#".to_string(),
+            conn_id: "valid-conn-id".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // The host should silently reject the message (no crash, no ConnectFailed
+        // because the socket_id validation happens before the lookup).
+        // Send a Ping to verify the connection is still alive.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        conn.send(&Message::Ping).await.unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::Pong => return msg,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("should receive Pong within timeout");
+
+        assert!(
+            matches!(response, Message::Pong),
+            "connection should still be alive after invalid socket_id"
+        );
+
+        drop(conn);
+        host_handle.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 26: SocketConnectRequest with invalid conn_id is rejected
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_socket_connect_request_invalid_conn_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        let _sock_path = create_unix_socket(tmp.path(), "valid2.sock");
+
+        let config = host_config_with_socket_scanning(control_port, data_port, tmp.path(), 100);
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+        let mut conn = register_container(control_addr, "invalid-cid-test", "test-host").await;
+
+        // Wait for SocketForward to get a valid socket_id
+        let socket_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward { socket_id, .. } => return socket_id,
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("should receive SocketForward within timeout");
+
+        // Send SocketConnectRequest with valid socket_id but invalid conn_id
+        conn.send(&Message::SocketConnectRequest {
+            socket_id,
+            conn_id: "invalid conn id!@#$%".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Verify connection is still alive
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        conn.send(&Message::Ping).await.unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::Pong => return msg,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("should receive Pong within timeout");
+
+        assert!(
+            matches!(response, Message::Pong),
+            "connection should still be alive after invalid conn_id"
+        );
+
+        drop(conn);
+        host_handle.abort();
+    }
 }
