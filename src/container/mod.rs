@@ -27,6 +27,19 @@ use self::data::spawn_connect_handler;
 use self::filter::PortFilter;
 use self::scanner::{ListeningPort, ScanError};
 
+/// A message to be relayed on the control channel, with an optional
+/// acknowledgment sender so the originator can wait until the message
+/// has been written to the wire.
+pub struct RelayMessage {
+    /// The protocol message to send.
+    pub msg: Message,
+    /// If present, the session loop will signal after the message has been
+    /// successfully written to the control connection. This allows the sender
+    /// to wait for the host to receive the message before proceeding (e.g.,
+    /// opening a data connection).
+    pub ack_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
 /// Exponential backoff with reset, encapsulating retry delay state.
 ///
 /// Used by the container daemon reconnection loop to progressively
@@ -505,12 +518,17 @@ async fn run_session(
     let mut forwarded = initial_forwarded;
     let mut scan_ticker = tokio::time::interval(params.scan_interval);
 
-    // Channel for connect handlers to report failures back to the session
-    // loop, which relays them as ConnectFailed on the control connection.
-    let (fail_tx, mut fail_rx) = tokio::sync::mpsc::channel::<Message>(64);
+    // Channel for connect handlers and socket mirror accept loops to send
+    // messages (ConnectFailed, SocketConnectRequest) back to the session
+    // loop, which relays them on the control connection.
+    let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<RelayMessage>(64);
 
     // Track spawned connect handler tasks for graceful drain on exit.
     let mut connect_handles: Vec<tokio::task::JoinHandle<Result<(), data::DataError>>> = Vec::new();
+
+    // Track active mirror sockets for Unix socket forwarding.
+    #[cfg(unix)]
+    let mut mirror_sockets: HashMap<String, socket::MirrorSocket> = HashMap::new();
 
     let outcome = 'session: loop {
         tokio::select! {
@@ -580,7 +598,7 @@ async fn run_session(
                 match msg_result {
                     Ok(Message::ConnectRequest { port, conn_id }) => {
                         info!(port, %conn_id, "received ConnectRequest");
-                        let handle = spawn_connect_handler(port, conn_id, params.data_addr, fail_tx.clone());
+                        let handle = spawn_connect_handler(port, conn_id, params.data_addr, msg_tx.clone());
                         connect_handles.push(handle);
                         // Prune completed handles to avoid unbounded growth
                         connect_handles.retain(|h| !h.is_finished());
@@ -600,6 +618,39 @@ async fn run_session(
                             forwarded.remove(&port);
                         }
                     }
+                    #[cfg(unix)]
+                    Ok(Message::SocketForward { socket_id, host_path: _, container_path }) => {
+                        let path = std::path::PathBuf::from(&container_path);
+                        match socket::create_mirror_socket(&socket_id, &path) {
+                            Ok(mut mirror) => {
+                                info!(socket_id = %socket_id, path = %container_path, "created mirror socket for forwarding");
+                                if let Some(listener) = mirror.listener.take() {
+                                    let shutdown_rx = mirror.shutdown_rx.clone();
+                                    tokio::spawn(socket::run_mirror_accept_loop(
+                                        socket_id.clone(),
+                                        listener,
+                                        msg_tx.clone(),
+                                        params.data_addr,
+                                        shutdown_rx,
+                                    ));
+                                }
+                                mirror_sockets.insert(socket_id, mirror);
+                            }
+                            Err(e) => {
+                                warn!(socket_id = %socket_id, error = %e, "failed to create mirror socket");
+                            }
+                        }
+                    }
+                    #[cfg(unix)]
+                    Ok(Message::SocketUnforward { socket_id }) => {
+                        if let Some(mirror) = mirror_sockets.remove(&socket_id) {
+                            let _ = mirror.shutdown_tx.send(true);
+                            socket::remove_mirror_socket(&mirror);
+                            info!(socket_id = %socket_id, "removed mirror socket");
+                        } else {
+                            debug!(socket_id = %socket_id, "received SocketUnforward for unknown socket_id");
+                        }
+                    }
                     Ok(other) => {
                         debug!(?other, "ignoring unexpected message");
                     }
@@ -614,11 +665,17 @@ async fn run_session(
                 }
             }
 
-            // Relay ConnectFailed from connect handler tasks to the host
-            Some(fail_msg) = fail_rx.recv() => {
-                if let Err(e) = conn.send(&fail_msg).await {
-                    warn!(error = %e, "failed to send ConnectFailed");
+            // Relay messages from connect handlers and socket mirrors to the host
+            Some(relay) = msg_rx.recv() => {
+                if let Err(e) = conn.send(&relay.msg).await {
+                    warn!(error = %e, "failed to relay message to host");
                     break 'session SessionOutcome::Error(ContainerError::Control(e));
+                }
+                // Signal back to the sender that the message was written,
+                // so it can proceed with follow-up actions (e.g., opening
+                // a data connection after SocketConnectRequest).
+                if let Some(ack_tx) = relay.ack_tx {
+                    let _ = ack_tx.send(());
                 }
             }
 
@@ -634,6 +691,16 @@ async fn run_session(
             }
         }
     };
+
+    // Clean up mirror sockets on session exit
+    #[cfg(unix)]
+    if !mirror_sockets.is_empty() {
+        info!(
+            count = mirror_sockets.len(),
+            "cleaning up mirror sockets on session exit"
+        );
+        socket::cleanup_all_mirrors(&mut mirror_sockets);
+    }
 
     // Drain in-flight connect handler tasks before returning, so we don't
     // abandon data connections mid-transfer.

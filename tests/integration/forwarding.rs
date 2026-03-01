@@ -1589,4 +1589,192 @@ mod socket_scanner_tests {
         echo_handle.abort();
         host_handle.abort();
     }
+
+    // -----------------------------------------------------------------------
+    // Test 23: Full socket proxy pipeline using container mirror accept loop
+    // -----------------------------------------------------------------------
+    //
+    // This test validates the container-side mirror socket accept loop by:
+    // 1. Starting a Unix echo server (simulating a host-side socket)
+    // 2. Starting a host daemon with socket scanning
+    // 3. Registering a simulated container
+    // 4. Waiting for SocketForward, then creating a mirror socket with the
+    //    container-side accept loop
+    // 5. Connecting a client to the mirror socket
+    // 6. Verifying bidirectional data flows through the full chain:
+    //    client -> mirror socket -> container accept loop ->
+    //    SocketConnectRequest -> data connection -> host -> Unix echo server
+
+    #[tokio::test]
+    async fn test_full_socket_proxy_with_mirror_accept_loop() {
+        use dbr::container::socket::{
+            cleanup_all_mirrors, create_mirror_socket, run_mirror_accept_loop,
+        };
+        use dbr::container::RelayMessage;
+        use tokio::net::UnixListener;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mirror_tmp = tempfile::tempdir().unwrap();
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        // 1. Create a Unix echo server on the host
+        let sock_path = tmp.path().join("echo.sock");
+        let unix_listener = UnixListener::bind(&sock_path).unwrap();
+
+        let echo_handle = tokio::spawn(async move {
+            loop {
+                match unix_listener.accept().await {
+                    Ok((mut stream, _)) => {
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 4096];
+                            loop {
+                                let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+                                    .await
+                                {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => n,
+                                };
+                                if tokio::io::AsyncWriteExt::write_all(&mut stream, &buf[..n])
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // 2. Start host daemon with socket scanning watching the tmp dir
+        let config = host_config_with_socket_scanning(control_port, data_port, tmp.path(), 100);
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+        let data_addr: SocketAddr = ([127, 0, 0, 1], data_port).into();
+        let mut conn = register_container(control_addr, "mirror-test", "mirror-host").await;
+
+        // 3. Wait for SocketForward and extract details
+        let (socket_id, container_path) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward {
+                        socket_id,
+                        container_path,
+                        ..
+                    } => return (socket_id, container_path),
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("should receive SocketForward within timeout");
+
+        // 4. Create mirror socket and start accept loop (simulating container daemon)
+        // Use a local path in mirror_tmp to avoid path conflicts
+        let mirror_path = mirror_tmp
+            .path()
+            .join(std::path::Path::new(&container_path).file_name().unwrap());
+
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<RelayMessage>(64);
+
+        let mut mirror = create_mirror_socket(&socket_id, &mirror_path).unwrap();
+        let listener = mirror.listener.take().unwrap();
+        let shutdown_rx = mirror.shutdown_rx.clone();
+
+        tokio::spawn(run_mirror_accept_loop(
+            socket_id.clone(),
+            listener,
+            msg_tx.clone(),
+            data_addr,
+            shutdown_rx,
+        ));
+
+        let mut mirror_sockets = std::collections::HashMap::new();
+        mirror_sockets.insert(socket_id.clone(), mirror);
+
+        // 5. Connect a client to the mirror socket. This triggers the accept
+        //    loop to spawn handle_socket_client, which sends a RelayMessage
+        //    containing SocketConnectRequest + ack_tx on msg_rx.
+        let mut client = tokio::net::UnixStream::connect(&mirror_path)
+            .await
+            .expect("should connect to mirror socket");
+
+        // 6. Act as the session loop: receive the RelayMessage, relay the
+        //    control message to the host, and signal the ack so
+        //    handle_socket_client proceeds to open the data connection.
+        let relay = tokio::time::timeout(Duration::from_secs(5), msg_rx.recv())
+            .await
+            .expect("should receive RelayMessage within timeout")
+            .expect("msg_rx should not be closed");
+
+        // Send the SocketConnectRequest on the registered control connection
+        conn.send(&relay.msg).await.unwrap();
+
+        // Signal the ack so handle_socket_client opens the data connection
+        // *after* the host has received the SocketConnectRequest.
+        if let Some(ack_tx) = relay.ack_tx {
+            let _ = ack_tx.send(());
+        }
+
+        // Small delay for the host to process the SocketConnectRequest and
+        // register the pending connection before ConnectReady arrives.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // 7. Send data through the client and verify echo response
+        let test_data = b"Mirror socket pipeline test!";
+        client.write_all(test_data).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut response = vec![0u8; test_data.len()];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut response),
+        )
+        .await
+        .expect("should receive echo within timeout")
+        .expect("read should succeed");
+
+        assert_eq!(
+            &response, test_data,
+            "echo response should match sent data through mirror socket pipeline"
+        );
+
+        // Send a second message to verify ongoing bidirectional flow
+        let test_data_2 = b"Second mirror message";
+        client.write_all(test_data_2).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut response_2 = vec![0u8; test_data_2.len()];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut response_2),
+        )
+        .await
+        .expect("should receive second echo within timeout")
+        .expect("second read should succeed");
+
+        assert_eq!(&response_2, test_data_2);
+
+        // 8. Clean up
+        drop(client);
+        drop(conn);
+        let _ = mirror_sockets
+            .values()
+            .next()
+            .map(|m| m.shutdown_tx.send(true));
+        cleanup_all_mirrors(&mut mirror_sockets);
+        echo_handle.abort();
+        host_handle.abort();
+    }
 }

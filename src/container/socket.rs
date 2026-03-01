@@ -6,12 +6,17 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
-use tokio::net::UnixListener;
-use tokio::sync::watch;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpStream, UnixListener};
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
+
+use crate::container::RelayMessage;
+use crate::protocol::Message;
 
 /// Errors from socket mirror operations.
 #[derive(Debug, Error)]
@@ -182,6 +187,155 @@ pub fn remove_mirror_socket(mirror: &MirrorSocket) {
         path = %mirror.container_path.display(),
         "cleaned up mirror socket"
     );
+}
+
+/// Run the accept loop for a mirror socket.
+///
+/// For each client connection:
+/// 1. Generate a `conn_id` (UUID)
+/// 2. Send `SocketConnectRequest { socket_id, conn_id }` on the control channel
+/// 3. Wait for the session loop to acknowledge the message was sent
+/// 4. Open a reverse TCP connection to the host data port
+/// 5. Send `ConnectReady { conn_id }` on the data connection
+/// 6. Bridge the `UnixStream` (client) and `TcpStream` (data) bidirectionally
+///
+/// Runs until the shutdown signal is received.
+///
+/// # Arguments
+///
+/// * `socket_id` — The unique identifier for this socket forward.
+/// * `listener` — The `UnixListener` accepting client connections.
+/// * `control_tx` — Channel to send relay messages (e.g., `SocketConnectRequest`) back to the session loop.
+/// * `host_data_addr` — The host data port address for reverse TCP connections.
+/// * `shutdown_rx` — Watch channel that signals shutdown when set to `true`.
+pub async fn run_mirror_accept_loop(
+    socket_id: String,
+    listener: UnixListener,
+    control_tx: mpsc::Sender<RelayMessage>,
+    host_data_addr: SocketAddr,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((unix_stream, _addr)) => {
+                        let conn_id = uuid::Uuid::new_v4().to_string();
+                        let socket_id = socket_id.clone();
+                        let control_tx = control_tx.clone();
+
+                        tokio::spawn(async move {
+                            handle_socket_client(
+                                socket_id, conn_id, unix_stream,
+                                control_tx, host_data_addr,
+                            ).await;
+                        });
+                    }
+                    Err(e) => {
+                        warn!(socket_id = %socket_id, error = %e, "accept failed on mirror socket");
+                    }
+                }
+            }
+            _ = shutdown_rx.changed() => {
+                debug!(socket_id = %socket_id, "mirror socket accept loop shutting down");
+                break;
+            }
+        }
+    }
+}
+
+/// Handle a single client connection to a mirror socket.
+///
+/// Sends `SocketConnectRequest` on the control channel, waits for the session
+/// loop to acknowledge the send, then opens a reverse data connection to the
+/// host, sends `ConnectReady`, and bridges the Unix stream and TCP stream
+/// bidirectionally.
+///
+/// The ack-before-connect pattern ensures the host has received and registered
+/// a pending connection for the `conn_id` before the data channel's
+/// `ConnectReady` arrives, preventing a race where the host would discard the
+/// data connection as unmatched.
+async fn handle_socket_client(
+    socket_id: String,
+    conn_id: String,
+    mut unix_stream: tokio::net::UnixStream,
+    control_tx: mpsc::Sender<RelayMessage>,
+    host_data_addr: SocketAddr,
+) {
+    debug!(%conn_id, %socket_id, "handling mirror socket client connection");
+
+    // 1. Send SocketConnectRequest on control channel and wait for ack
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    if control_tx
+        .send(RelayMessage {
+            msg: Message::SocketConnectRequest {
+                socket_id: socket_id.clone(),
+                conn_id: conn_id.clone(),
+            },
+            ack_tx: Some(ack_tx),
+        })
+        .await
+        .is_err()
+    {
+        warn!(%conn_id, "control channel closed, cannot send SocketConnectRequest");
+        return;
+    }
+
+    // Wait for the session loop to confirm the message was written to the
+    // control connection. This ensures the host will have the pending
+    // connection registered before our ConnectReady arrives.
+    if ack_rx.await.is_err() {
+        warn!(%conn_id, "session loop dropped ack sender before confirming SocketConnectRequest");
+        return;
+    }
+
+    // 2. Connect to host data port (reverse TCP connection)
+    let mut data_stream = match TcpStream::connect(host_data_addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(%conn_id, error = %e, "failed to connect to host data port");
+            return;
+        }
+    };
+
+    // 3. Send ConnectReady handshake on data connection
+    let ready_msg = Message::ConnectReady {
+        conn_id: conn_id.clone(),
+    };
+    let mut json = match serde_json::to_string(&ready_msg) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(%conn_id, error = %e, "failed to serialize ConnectReady");
+            return;
+        }
+    };
+    json.push('\n');
+
+    if let Err(e) = data_stream.write_all(json.as_bytes()).await {
+        warn!(%conn_id, error = %e, "failed to send ConnectReady on data channel");
+        return;
+    }
+    if let Err(e) = data_stream.flush().await {
+        warn!(%conn_id, error = %e, "failed to flush ConnectReady on data channel");
+        return;
+    }
+
+    info!(%conn_id, %socket_id, "socket data connection ready, starting bridge");
+
+    // 4. Bridge UnixStream <-> TcpStream bidirectionally
+    match tokio::io::copy_bidirectional(&mut unix_stream, &mut data_stream).await {
+        Ok((c2h, h2c)) => {
+            debug!(
+                %conn_id,
+                client_to_host = c2h,
+                host_to_client = h2c,
+                "socket bridge completed"
+            );
+        }
+        Err(e) => {
+            debug!(%conn_id, error = %e, "socket bridge ended");
+        }
+    }
 }
 
 /// Removes all mirror sockets and clears the map.

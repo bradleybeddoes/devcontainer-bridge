@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 /// the port is in a half-open state.
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+use crate::container::RelayMessage;
 use crate::control::ControlError;
 use crate::protocol::Message;
 
@@ -187,16 +188,19 @@ pub fn spawn_connect_handler(
     port: u16,
     conn_id: String,
     host_data_addr: SocketAddr,
-    fail_tx: tokio::sync::mpsc::Sender<Message>,
+    fail_tx: tokio::sync::mpsc::Sender<RelayMessage>,
 ) -> tokio::task::JoinHandle<Result<(), DataError>> {
     tokio::spawn(async move {
         let result = handle_connect_request(port, conn_id.clone(), host_data_addr).await;
         if let Err(ref e) = result {
             error!(%conn_id, port, error = %e, "connect request failed");
             let _ = fail_tx
-                .send(Message::ConnectFailed {
-                    conn_id: conn_id.clone(),
-                    error: e.to_string(),
+                .send(RelayMessage {
+                    msg: Message::ConnectFailed {
+                        conn_id: conn_id.clone(),
+                        error: e.to_string(),
+                    },
+                    ack_tx: None,
                 })
                 .await;
         }
