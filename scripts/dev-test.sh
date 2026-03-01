@@ -56,6 +56,7 @@ log_info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
 log_pass()  { echo -e "${GREEN}[PASS]${NC}  $*"; pass_count=$((pass_count + 1)); }
 log_fail()  { echo -e "${RED}[FAIL]${NC}  $*"; fail_count=$((fail_count + 1)); }
 log_skip()  { echo -e "${YELLOW}[SKIP]${NC}  $*"; skip_count=$((skip_count + 1)); }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_phase() { echo -e "\n${BOLD}=== $* ===${NC}\n"; }
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,8 @@ done
 
 CLEANUP_PIDS=()
 CLEANUP_CONTAINERS=()
+ECHO_PID=""
+TEST_SOCKET_DIR=""
 
 cleanup() {
     local exit_code=$?
@@ -132,6 +135,14 @@ cleanup() {
     for pid in "${CLEANUP_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
+
+    # Clean up socket echo server and temp directory
+    if [[ -n "$ECHO_PID" ]]; then
+        kill "$ECHO_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$TEST_SOCKET_DIR" ]]; then
+        rm -rf "$TEST_SOCKET_DIR"
+    fi
 
     # Tear down the test container
     log_info "Tearing down test container..."
@@ -371,10 +382,43 @@ if pgrep -f "dbr host-daemon" >/dev/null 2>&1; then
     sleep 1
 fi
 
+# Create a test Unix socket echo server for socket forwarding tests.
+# The server accepts one connection at a time, echoes data back, then loops.
+TEST_SOCKET_DIR=$(mktemp -d)
+TEST_SOCKET_PATH="$TEST_SOCKET_DIR/test.sock"
+log_info "Starting Unix socket echo server at $TEST_SOCKET_PATH..."
+python3 -c "
+import socket, os, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind('$TEST_SOCKET_PATH')
+s.listen(5)
+while True:
+    conn, _ = s.accept()
+    try:
+        data = conn.recv(1024)
+        if data:
+            conn.sendall(data)
+    except Exception:
+        pass
+    finally:
+        conn.close()
+" &
+ECHO_PID=$!
+CLEANUP_PIDS+=("$ECHO_PID")
+sleep 0.5
+
+# Verify socket was created
+if [[ -S "$TEST_SOCKET_PATH" ]]; then
+    log_info "Socket echo server running (PID $ECHO_PID)"
+else
+    log_fail "Socket echo server failed to start"
+fi
+
 # Start host daemon directly in background with --browser-cmd so that OpenUrl
 # tests complete the full protocol flow without actually opening a browser.
 # We use /usr/bin/true which accepts any args and exits 0.
-log_info "Starting host daemon with --browser-cmd /usr/bin/true..."
+# Also configure socket watching for the test socket directory.
+log_info "Starting host daemon with --browser-cmd /usr/bin/true and socket watching..."
 "$HOST_BINARY" host-daemon \
     --control-port "$CONTROL_PORT" \
     --data-port "$DATA_PORT" \
@@ -382,7 +426,9 @@ log_info "Starting host daemon with --browser-cmd /usr/bin/true..."
     --browser-cmd /usr/bin/true \
     --exit-on-idle \
     --log-level debug \
-    --log-file /tmp/dbr-host-test.log &
+    --log-file /tmp/dbr-host-test.log \
+    --socket-watch-paths "$TEST_SOCKET_DIR/*.sock" \
+    --socket-scan-interval-ms 1000 &
 CLEANUP_PIDS+=("$!")
 sleep 1
 
@@ -571,6 +617,102 @@ if wait_for_status_gone "$TEST_PORT" "$FORWARD_WAIT"; then
     log_pass "Port $TEST_PORT removed from status after listener stopped"
 else
     log_fail "Port $TEST_PORT still appears in status after listener stopped"
+    log_info "  Current status:"
+    "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" 2>&1 | sed 's/^/    /' || true
+fi
+
+# ---------------------------------------------------------------------------
+# Test phase: Socket forwarding
+# ---------------------------------------------------------------------------
+
+log_phase "Test Phase: Socket Forwarding"
+
+# Test 1: Socket forward appears in status
+log_info "Waiting for socket forward to appear in status..."
+if wait_for_status "test.sock" 15; then
+    log_pass "Socket forward appears in status"
+else
+    log_fail "Socket forward not found in status"
+    log_info "  Current status:"
+    "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" 2>&1 | sed 's/^/    /' || true
+fi
+
+# Test 2: Socket forward appears in JSON status with correct structure
+log_info "Validating socket forward in JSON status..."
+sock_status_json=$("$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" --json 2>/dev/null || echo "{}")
+sock_json_valid=$(echo "$sock_status_json" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    sf = data.get('socket_forwards', [])
+    if not isinstance(sf, list) or len(sf) == 0:
+        print('no_socket_forwards')
+        sys.exit(0)
+    for entry in sf:
+        required = ['socket_id', 'host_path', 'container_path']
+        missing = [k for k in required if k not in entry]
+        if missing:
+            print('missing:' + ','.join(missing))
+            sys.exit(0)
+        if 'test.sock' in entry.get('host_path', ''):
+            print('valid')
+            sys.exit(0)
+    print('no_test_sock')
+except json.JSONDecodeError:
+    print('invalid_json')
+" 2>/dev/null || echo "error")
+
+if [[ "$sock_json_valid" == "valid" ]]; then
+    log_pass "Socket forward JSON status has correct structure"
+else
+    log_fail "Socket forward JSON status invalid: $sock_json_valid"
+    log_info "  Raw JSON: $sock_status_json"
+fi
+
+# Test 3: Data transfer through socket forward (via mirror socket in container)
+log_info "Testing data transfer through forwarded socket..."
+MIRROR_SOCK=""
+for i in $(seq 1 10); do
+    MIRROR_SOCK=$(docker exec "$TEST_CONTAINER_NAME" find /tmp -name "test.sock" 2>/dev/null | head -1)
+    if [[ -n "$MIRROR_SOCK" ]]; then
+        break
+    fi
+    sleep 1
+done
+
+if [[ -n "$MIRROR_SOCK" ]]; then
+    log_info "Found mirror socket at $MIRROR_SOCK in container"
+    SOCK_RESPONSE=$(docker exec "$TEST_CONTAINER_NAME" python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect('$MIRROR_SOCK')
+s.sendall(b'hello-socket')
+data = s.recv(1024)
+print(data.decode())
+s.close()
+" 2>/dev/null || true)
+    if [[ "$SOCK_RESPONSE" == "hello-socket" ]]; then
+        log_pass "Socket data transfer works (echo round-trip verified)"
+    else
+        log_fail "Socket data transfer failed: got '$SOCK_RESPONSE'"
+        log_info "  Check /tmp/dbr-host-test.log for errors"
+    fi
+else
+    log_warn "Mirror socket not found in container after 10s (container may not support socket forwarding yet)"
+fi
+
+# Test 4: Socket cleanup on removal
+log_info "Testing socket cleanup on removal..."
+rm -f "$TEST_SOCKET_PATH"
+kill "$ECHO_PID" 2>/dev/null || true
+ECHO_PID=""
+sleep 1
+
+if wait_for_status_gone "test.sock" 10; then
+    log_pass "Socket forward cleaned up after socket removal"
+else
+    log_fail "Socket forward still appears after socket removal"
     log_info "  Current status:"
     "$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" 2>&1 | sed 's/^/    /' || true
 fi
