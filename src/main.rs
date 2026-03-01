@@ -20,7 +20,7 @@ use dbr::config::{Config, SocketForwardingConfig};
 use dbr::container::browser;
 use dbr::control::{self, ControlConnection, ControlError};
 use dbr::host::HostConfig;
-use dbr::protocol::{ForwardInfo, Message, Protocol};
+use dbr::protocol::{ForwardInfo, Message, Protocol, SocketForwardInfo};
 
 use cli::{Cli, Command};
 
@@ -487,13 +487,28 @@ async fn run_status(
     conn.send(&Message::ListRequest).await?;
 
     match conn.recv().await? {
-        Message::ListResponse { forwards } => {
+        Message::ListResponse {
+            forwards,
+            socket_forwards,
+        } => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&forwards)?);
-            } else if forwards.is_empty() {
+                let output = serde_json::json!({
+                    "forwards": forwards,
+                    "socket_forwards": socket_forwards,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else if forwards.is_empty() && socket_forwards.is_empty() {
                 println!("No active forwards.");
             } else {
-                print_forward_table(&forwards);
+                if !forwards.is_empty() {
+                    print_forward_table(&forwards);
+                }
+                if !socket_forwards.is_empty() {
+                    if !forwards.is_empty() {
+                        println!();
+                    }
+                    print_socket_forward_table(&socket_forwards);
+                }
             }
             Ok(())
         }
@@ -517,6 +532,19 @@ fn print_forward_table(forwards: &[ForwardInfo]) {
         println!(
             "{:<20} {:>5}   {:>9}  {:<12} {}",
             fwd.hostname, fwd.port, fwd.host_port, process, since
+        );
+    }
+}
+
+/// Print a human-readable table of active socket forwards.
+fn print_socket_forward_table(socket_forwards: &[SocketForwardInfo]) {
+    let header = "Container Path";
+    println!("{:<36} {:<40} {header}", "Socket ID", "Host Path");
+
+    for sf in socket_forwards {
+        println!(
+            "{:<36} {:<40} {}",
+            sf.socket_id, sf.host_path, sf.container_path
         );
     }
 }

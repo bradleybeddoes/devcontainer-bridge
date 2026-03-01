@@ -381,7 +381,10 @@ async fn test_list_request_response() {
 
     let response = cli_conn.recv().await.unwrap();
     match response {
-        Message::ListResponse { forwards } => {
+        Message::ListResponse {
+            forwards,
+            socket_forwards,
+        } => {
             assert_eq!(forwards.len(), 1, "should have exactly one forward");
             let fwd = &forwards[0];
             assert_eq!(fwd.container_id, "list-test-container");
@@ -390,6 +393,10 @@ async fn test_list_request_response() {
             assert_eq!(fwd.host_port, host_port);
             assert_eq!(fwd.process_name.as_deref(), Some("my-app"));
             assert_eq!(fwd.pid, Some(42));
+            assert!(
+                socket_forwards.is_empty(),
+                "no socket forwards expected in this test"
+            );
         }
         other => panic!("expected ListResponse, got {other:?}"),
     }
@@ -489,7 +496,7 @@ async fn test_multi_container_port_conflict() {
     cli_conn.send(&Message::ListRequest).await.unwrap();
     let response = cli_conn.recv().await.unwrap();
     match response {
-        Message::ListResponse { forwards } => {
+        Message::ListResponse { forwards, .. } => {
             assert_eq!(forwards.len(), 2, "should have two forwards");
         }
         other => panic!("expected ListResponse, got {other:?}"),
@@ -1775,6 +1782,90 @@ mod socket_scanner_tests {
             .map(|m| m.shutdown_tx.send(true));
         cleanup_all_mirrors(&mut mirror_sockets);
         echo_handle.abort();
+        host_handle.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 24: ListResponse includes socket forwards
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_list_response_includes_socket_forwards() {
+        let tmp = tempfile::tempdir().unwrap();
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        // Create a socket before starting the daemon
+        let _sock_path = create_unix_socket(tmp.path(), "list-test.sock");
+
+        let config = host_config_with_socket_scanning(
+            control_port,
+            data_port,
+            tmp.path(),
+            100, // fast scan interval
+        );
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+
+        // Register a container so the scanner has someone to send SocketForward to
+        let mut container_conn =
+            register_container(control_addr, "list-socket-test", "list-socket-host").await;
+
+        // Wait for the SocketForward message so we know the scanner has discovered it
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = container_conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = container_conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward { .. } => return,
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("should receive SocketForward within timeout");
+
+        // Now send a ListRequest from a separate CLI connection
+        let mut cli_conn = control::connect(control_addr).await.unwrap();
+        cli_conn.send(&Message::ListRequest).await.unwrap();
+
+        let response = cli_conn.recv().await.unwrap();
+        match response {
+            Message::ListResponse {
+                forwards,
+                socket_forwards,
+            } => {
+                assert!(forwards.is_empty(), "no port forwards expected");
+                assert_eq!(
+                    socket_forwards.len(),
+                    1,
+                    "should have exactly one socket forward"
+                );
+                let sf = &socket_forwards[0];
+                assert!(
+                    sf.host_path.contains("list-test.sock"),
+                    "host_path should reference the socket file, got: {}",
+                    sf.host_path
+                );
+                assert!(
+                    sf.container_path.contains("list-test.sock"),
+                    "container_path should reference the socket file, got: {}",
+                    sf.container_path
+                );
+                assert!(!sf.socket_id.is_empty(), "socket_id should not be empty");
+            }
+            other => panic!("expected ListResponse, got {other:?}"),
+        }
+
+        // Clean up
+        drop(cli_conn);
+        drop(container_conn);
         host_handle.abort();
     }
 }

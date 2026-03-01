@@ -116,6 +116,17 @@ pub struct ForwardInfo {
     pub since: String,
 }
 
+/// Information about an active Unix socket forward, used in [`Message::ListResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketForwardInfo {
+    /// Unique identifier for this socket forward.
+    pub socket_id: String,
+    /// Absolute path on the host.
+    pub host_path: String,
+    /// Path inside the container.
+    pub container_path: String,
+}
+
 /// A control channel message exchanged between host and container daemons.
 ///
 /// Messages are serialized as JSON with an internally-tagged `"type"` field.
@@ -227,6 +238,12 @@ pub enum Message {
     ListResponse {
         /// All currently active port forwards across all containers.
         forwards: Vec<ForwardInfo>,
+        /// All currently active Unix socket forwards.
+        ///
+        /// Defaults to empty for backwards compatibility with older hosts
+        /// that do not include this field.
+        #[serde(default)]
+        socket_forwards: Vec<SocketForwardInfo>,
     },
 
     /// Host tells a container to create a mirror of a host-side Unix socket.
@@ -470,6 +487,7 @@ mod tests {
                 pid: Some(1234),
                 since: "2026-01-01T00:00:00Z".into(),
             }],
+            socket_forwards: vec![],
         };
         let json = serialize_message(&msg).unwrap();
         let decoded = deserialize_message(&json).unwrap();
@@ -477,8 +495,48 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_list_response_with_socket_forwards() {
+        let msg = Message::ListResponse {
+            forwards: vec![],
+            socket_forwards: vec![SocketForwardInfo {
+                socket_id: "sock-abc".into(),
+                host_path: "/tmp/host/test.sock".into(),
+                container_path: "/run/host-sockets/test.sock".into(),
+            }],
+        };
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains(r#""socket_forwards""#));
+        let decoded = deserialize_message(&json).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn list_response_without_socket_forwards_field_deserializes_with_empty_vec() {
+        // Backwards compatibility: an old host that only sends `forwards`
+        // should deserialize with an empty `socket_forwards`.
+        let json = r#"{"type":"ListResponse","forwards":[]}"#;
+        let msg = deserialize_message(json).unwrap();
+        match msg {
+            Message::ListResponse {
+                forwards,
+                socket_forwards,
+            } => {
+                assert!(forwards.is_empty());
+                assert!(
+                    socket_forwards.is_empty(),
+                    "socket_forwards should default to empty vec"
+                );
+            }
+            _ => panic!("expected ListResponse"),
+        }
+    }
+
+    #[test]
     fn list_response_empty_forwards() {
-        let msg = Message::ListResponse { forwards: vec![] };
+        let msg = Message::ListResponse {
+            forwards: vec![],
+            socket_forwards: vec![],
+        };
         let json = serialize_message(&msg).unwrap();
         let decoded = deserialize_message(&json).unwrap();
         assert_eq!(msg, decoded);

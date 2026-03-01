@@ -346,6 +346,28 @@ impl HostState {
         }
         infos
     }
+
+    /// Build [`SocketForwardInfo`] list for [`Message::ListResponse`].
+    #[cfg(unix)]
+    fn collect_socket_forward_info(&self) -> Vec<crate::protocol::SocketForwardInfo> {
+        self.socket_forwards
+            .values()
+            .map(|info| crate::protocol::SocketForwardInfo {
+                socket_id: info.socket_id.clone(),
+                host_path: info.host_path.to_string_lossy().to_string(),
+                container_path: info.container_path.clone(),
+            })
+            .collect()
+    }
+
+    /// Build [`SocketForwardInfo`] list for [`Message::ListResponse`].
+    ///
+    /// Returns an empty list on non-Unix platforms where socket forwarding
+    /// is not supported.
+    #[cfg(not(unix))]
+    fn collect_socket_forward_info(&self) -> Vec<crate::protocol::SocketForwardInfo> {
+        Vec::new()
+    }
 }
 
 /// Shared resources threaded through control connection handlers.
@@ -860,9 +882,15 @@ async fn handle_control_connection(
             }
         }
         Message::ListRequest => {
-            let infos = ctx.state.lock().await.collect_forward_info();
-            conn.send(&Message::ListResponse { forwards: infos })
-                .await?;
+            let state = ctx.state.lock().await;
+            let infos = state.collect_forward_info();
+            let socket_fwd_infos = state.collect_socket_forward_info();
+            drop(state);
+            conn.send(&Message::ListResponse {
+                forwards: infos,
+                socket_forwards: socket_fwd_infos,
+            })
+            .await?;
             Ok(())
         }
         Message::Ping => {
