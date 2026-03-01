@@ -2019,4 +2019,123 @@ mod socket_scanner_tests {
         drop(conn);
         host_handle.abort();
     }
+
+    // -----------------------------------------------------------------------
+    // Test 27: Chrome bridge socket pattern detection and path rewriting
+    // -----------------------------------------------------------------------
+    //
+    // Validates the primary use case for socket forwarding: the Claude Chrome
+    // browser bridge socket, which follows the pattern:
+    //   Host:      /tmp/claude-mcp-browser-bridge-<username>/<PID>.sock
+    //   Container: /tmp/claude-mcp-browser-bridge-<container_user>/<PID>.sock
+    //
+    // This test proves:
+    // 1. Recursive glob patterns (**/*.sock) match the Chrome bridge directory structure
+    // 2. container_path_prefix correctly rewrites the directory (testuser → vscode)
+    // 3. The socket is detected by the scanner
+    // 4. SocketForward is sent with correct host_path and rewritten container_path
+
+    #[tokio::test]
+    async fn test_chrome_bridge_socket_pattern() {
+        // Use /tmp directly to keep socket paths under the 108-char sun_path limit.
+        // macOS tempfile dirs (/var/folders/...) are too long when combined with the
+        // Chrome bridge directory name.
+        let base_dir = std::path::PathBuf::from("/tmp/dbr-chrome-test");
+        let _ = std::fs::remove_dir_all(&base_dir);
+        std::fs::create_dir_all(&base_dir).unwrap();
+
+        // Simulate the Chrome bridge directory structure:
+        //   /tmp/dbr-chrome-test/claude-mcp-browser-bridge-testuser/12345.sock
+        let bridge_dir = base_dir.join("claude-mcp-browser-bridge-testuser");
+        std::fs::create_dir_all(&bridge_dir).unwrap();
+
+        // Create a "Chrome native host" socket
+        let _sock_path = create_unix_socket(&bridge_dir, "12345.sock");
+
+        // Ensure cleanup even on test failure
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(base_dir.clone());
+
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        // Use a recursive glob pattern matching Chrome bridge sockets
+        let glob_pattern = format!("{}/**/*.sock", base_dir.display());
+
+        let config = HostConfig {
+            control_port,
+            data_port,
+            exit_on_idle: false,
+            bind_addr: Some(std::net::Ipv4Addr::LOCALHOST.into()),
+            socket_forwarding: SocketForwardingConfig {
+                enabled: true,
+                watch_paths: vec![glob_pattern],
+                container_path_prefix: Some("/tmp/claude-mcp-browser-bridge-vscode/".to_string()),
+                scan_interval_ms: 100,
+                max_socket_forwards: 16,
+            },
+            ..HostConfig::default()
+        };
+
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+        let mut conn = register_container(control_addr, "chrome-bridge-test", "chrome-host").await;
+
+        // Wait for SocketForward with the rewritten container_path
+        let (socket_id, host_path, container_path) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let msg = conn.recv().await.unwrap();
+                    match msg {
+                        Message::Ping => {
+                            let _ = conn.send(&Message::Pong).await;
+                            continue;
+                        }
+                        Message::SocketForward {
+                            socket_id,
+                            host_path,
+                            container_path,
+                        } => return (socket_id, host_path, container_path),
+                        other => panic!("unexpected message: {other:?}"),
+                    }
+                }
+            })
+            .await
+            .expect("should receive SocketForward within timeout");
+
+        // Verify the container_path was rewritten with the prefix
+        assert!(
+            container_path.starts_with("/tmp/claude-mcp-browser-bridge-vscode/"),
+            "container_path should start with the vscode prefix, got: {container_path}"
+        );
+        assert!(
+            container_path.ends_with("12345.sock"),
+            "container_path should preserve the PID-based filename, got: {container_path}"
+        );
+
+        // Verify host_path points to the actual socket location
+        assert!(
+            host_path.contains("claude-mcp-browser-bridge-testuser"),
+            "host_path should reference the original user directory, got: {host_path}"
+        );
+        assert!(
+            host_path.ends_with("12345.sock"),
+            "host_path should end with the socket filename, got: {host_path}"
+        );
+
+        // Verify the socket_id is non-empty (UUID format)
+        assert!(!socket_id.is_empty(), "socket_id should not be empty");
+
+        // Clean up
+        drop(conn);
+        host_handle.abort();
+    }
 }
