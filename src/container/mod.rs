@@ -8,6 +8,8 @@ pub mod browser;
 pub mod data;
 pub mod filter;
 pub mod scanner;
+#[cfg(unix)]
+pub mod socket;
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
