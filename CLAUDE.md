@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Devcontainer Bridge is a dual-daemon tool that transparently forwards TCP ports and opens browser URLs between Linux devcontainers and the macOS/Linux host. It solves the gap left by the devcontainer CLI (vs VS Code) where container-bound ports are unreachable from the host and browser-opening requests fail in headless containers.
+Devcontainer Bridge is a dual-daemon tool that transparently forwards TCP ports, Unix sockets, and opens browser URLs between Linux devcontainers and the macOS/Linux host. It solves the gap left by the devcontainer CLI (vs VS Code) where container-bound ports are unreachable from the host, host Unix sockets are inaccessible from containers, and browser-opening requests fail in headless containers.
 
 **Primary use case:** Tools like Atlassian MCP's OAuth flow that bind a random port, open the host browser, and expect the callback on `localhost:PORT` — all of which fail without this bridge.
 
@@ -10,8 +10,8 @@ Devcontainer Bridge is a dual-daemon tool that transparently forwards TCP ports 
 
 Two daemons cooperate via a pair of TCP channels on loopback:
 
-- **Host daemon** (`dbr host-daemon`) — long-lived process on the host. Binds control and data ports, accepts registrations from containers, binds per-port listeners for forwarded ports, and opens URLs in the host browser.
-- **Container daemon** (`dbr container-daemon`) — runs inside each devcontainer. Polls `/proc/net/tcp` for new listeners, sends Forward/Unforward messages, and handles reverse data connections for proxying.
+- **Host daemon** (`dbr host-daemon`) — long-lived process on the host. Binds control and data ports, accepts registrations from containers, binds per-port listeners for forwarded ports, scans for Unix sockets to forward into containers, and opens URLs in the host browser.
+- **Container daemon** (`dbr container-daemon`) — runs inside each devcontainer. Polls `/proc/net/tcp` for new listeners, sends Forward/Unforward messages, creates mirror Unix sockets for host-side sockets, and handles reverse data connections for proxying.
 
 All TCP connections are initiated **container to host** (reverse connection model). This is required because macOS Docker Desktop cannot route to container IPs — containers run in a Linux VM with no direct host-to-container networking.
 
@@ -23,8 +23,8 @@ All TCP connections are initiated **container to host** (reverse connection mode
 
 | Channel | Default port | Default bind | Purpose |
 |---------|-------------|-------------|---------|
-| Control | `19285` | auto-detected | JSON-line protocol for registration, Forward/Unforward, OpenUrl, Ping/Pong, ListRequest/ListResponse |
-| Data | `19286` | auto-detected | Reverse data connections from containers for TCP proxying |
+| Control | `19285` | auto-detected | JSON-line protocol for registration, Forward/Unforward, SocketForward/SocketUnforward/SocketConnectRequest, OpenUrl, Ping/Pong, ListRequest/ListResponse |
+| Data | `19286` | auto-detected | Reverse data connections from containers for TCP and Unix socket proxying |
 
 Control and data ports use auto-detected bind addresses: `0.0.0.0` if Docker is running (so containers can reach the host via Docker Desktop's gateway IP), `127.0.0.1` otherwise. Configurable with `--bind-addr` or `--no-docker-detect`.
 
@@ -39,6 +39,19 @@ Control and data ports use auto-detected bind addresses: `0.0.0.0` if Docker is 
 6. Host daemon matches conn_id, bridges client <-> data connection
 7. Bidirectional copy via tokio::io::copy_bidirectional
 8. When either side closes, both connections tear down
+```
+
+### Data flow for a socket-forwarded connection
+
+```
+1. Host daemon scanner discovers Unix socket matching watch_paths glob
+2. Host sends SocketForward{socket_id, host_path, container_path} to containers
+3. Container creates mirror UnixListener at container_path (mode 0600)
+4. Client in container connects to mirror socket
+5. Container sends SocketConnectRequest{socket_id, conn_id} on control channel
+6. Host connects to original Unix socket at host_path
+7. Container opens reverse TCP to host data port, sends ConnectReady{conn_id}
+8. Host bridges Unix socket <-> TCP data stream bidirectionally
 ```
 
 ### Key design decisions
@@ -57,25 +70,28 @@ Control and data ports use auto-detected bind addresses: `0.0.0.0` if Docker is 
 src/
   main.rs               CLI entrypoint, clap dispatch, tracing init, dbr-open hardlink detection
   dbr/entrypoint.sh     Devcontainer feature entrypoint — starts container daemon on container boot
-  cli.rs                Clap subcommand definitions (HostDaemon with --bind-addr/--no-docker-detect, ContainerDaemon, Status, Forward, Unforward, Open, Ensure)
-  protocol.rs           All JSON-line message types (Register, Forward, ConnectRequest, OpenUrl, Ping/Pong, etc.)
+  cli.rs                Clap subcommand definitions (HostDaemon with --bind-addr/--no-docker-detect/--no-auth, ContainerDaemon, Status, Forward, Unforward, Open, Ensure)
+  protocol.rs           All JSON-line message types (Register, Forward, ConnectRequest, SocketForward, SocketUnforward, SocketConnectRequest, OpenUrl, Ping/Pong, etc.)
   control.rs            TCP JSON-line framing (read_message/write_message), ControlListener, ControlConnection, connect()
-  config.rs             Config struct, TOML file loading (~/.config/dbr/config.toml), env var layering (DCBRIDGE_HOST, DCBRIDGE_HOST_PORT)
-  lib.rs                Crate root — re-exports config, container, control, host, protocol modules
+  config.rs             Config struct, TOML file loading (~/.config/dbr/config.toml), env var layering (DCBRIDGE_HOST, DCBRIDGE_HOST_PORT), [socket_forwarding] section
+  auth.rs               Token generation (64-char hex), persistence (~/.config/dbr/auth-token, 0600 perms), resolution (CLI flag > env var > file)
+  lib.rs                Crate root — re-exports auth, config, container, control, host, protocol modules
 
   container/
-    mod.rs              Container daemon main loop: host resolution, Register, scan/Forward/Unforward cycle, reconnection with exponential backoff, signal handling, parent PID monitoring
+    mod.rs              Container daemon main loop: host resolution, Register (with auth_token), scan/Forward/Unforward cycle, reconnection with exponential backoff, signal handling, parent PID monitoring
     scanner.rs          /proc/net/tcp + /proc/net/tcp6 parser (hex port extraction, LISTEN state filtering, inode-to-process resolution)
     filter.rs           Port filtering: --exclude-ports, --include-ports, --exclude-process regex, forwardPorts from devcontainer.json
     browser.rs          `dbr open` client: validates URL (http/https, 2048 char cap), connects to host, sends OpenUrl, waits for OpenUrlAck
     data.rs             Reverse data connection handler: on ConnectRequest, connects to local port + opens data connection to host + sends ConnectReady + bridges bidirectionally
+    socket.rs           Mirror socket creation/cleanup, UnixListener accept loop, SocketConnectRequest dispatch + reverse data bridge for socket connections
 
   host/
-    mod.rs              Host daemon main loop: control listener, data listener, container state management, Forward/Unforward/OpenUrl handling, heartbeat/keepalive (30s Ping, 3 missed Pongs = disconnect), connection draining, multi-container port conflict resolution, exit-on-idle
+    mod.rs              Host daemon main loop: control listener, data listener, container state management, Forward/Unforward/OpenUrl/SocketForward/SocketUnforward/SocketConnectRequest handling, heartbeat/keepalive (30s Ping, 3 missed Pongs = disconnect), connection draining, multi-container port conflict resolution, exit-on-idle, auth token validation
     listener.rs         Per-port TCP listener: binds [::1] with 127.0.0.1 fallback, accepts client connections, shutdown via watch channel
     proxy.rs            PendingConnections map (conn_id -> oneshot<TcpStream>), register/resolve/cancel pending, bridge_connection with 10s timeout, bidirectional copy
     browser.rs          BrowserOpener: URL validation, localhost port rewriting (container port -> host port), rate limiting (5/sec), open via `open` (macOS) / `xdg-open` (Linux)
     ensure.rs           `dbr ensure` logic: Ping/Pong health check, spawn background daemon if not running, PID file management, port conflict detection with actionable error
+    socket_scanner.rs   Glob-based Unix socket discovery (watch_paths patterns), lifecycle tracking (appear/disappear), container path rewriting, symlink_metadata (no symlink following)
 
 tests/
   integration/
@@ -98,6 +114,34 @@ tests/
 - **Two-tier binding model** — control and data ports use auto-detected bind addresses (`0.0.0.0` if Docker is running, `127.0.0.1` otherwise), configurable via `--bind-addr` or `--no-docker-detect`. Forwarded per-port listeners (`bind_loopback`) must always bind to `127.0.0.1` or `[::1]`, never `0.0.0.0` or `[::]`.
 - **Structured logging** via `tracing` crate — `info` for lifecycle events (register, forward, disconnect), `debug` for per-connection events, `warn` for recoverable errors, `error` for fatal errors
 - **Error types** — each module has its own `thiserror` error enum. Use `#[from]` for transparent wrapping, `#[source]` for explicit chaining.
+
+---
+
+## Configuration
+
+### Authentication CLI flags
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--no-auth` | `host-daemon` | Disable token authentication (accept any Register) |
+| `--auth-token <TOKEN>` | `container-daemon`, `open`, `status`, `forward`, `unforward` | Provide auth token directly |
+| `--auth-token-file <PATH>` | `container-daemon`, `open`, `status`, `forward`, `unforward` | Read auth token from file |
+
+Token resolution order: `--auth-token` flag > `DCBRIDGE_AUTH_TOKEN` env var > `--auth-token-file` flag > default file (`~/.config/dbr/auth-token`).
+
+### Socket forwarding TOML section
+
+In `~/.config/dbr/config.toml`:
+
+```toml
+[socket_forwarding]
+watch_paths = ["/tmp/*.sock", "/run/user/1000/**/*.sock"]  # Glob patterns for socket discovery
+scan_interval_secs = 5       # How often to scan for new/removed sockets (default: 5)
+max_sockets = 16             # Maximum number of sockets to forward (default: 16)
+container_base_path = "/tmp" # Base directory for mirror sockets in containers
+```
+
+When `watch_paths` is empty (the default), no Unix sockets are forwarded.
 
 ---
 
@@ -210,6 +254,13 @@ See [docs/development.md](docs/development.md) for the full development guide.
 - Follow "How to add a new protocol message" above
 - If it requires state, add fields to `ContainerState` or `HostState` in `host/mod.rs`
 
+### Unix socket forwarding (implemented)
+- Host-to-container Unix socket forwarding is fully implemented
+- `host/socket_scanner.rs` discovers sockets via glob patterns configured in `[socket_forwarding]` TOML section
+- `SocketForward`/`SocketUnforward` messages manage lifecycle; `SocketConnectRequest` triggers reverse data connections
+- `container/socket.rs` creates mirror sockets and bridges connections back to the host
+- To add new socket types or modify discovery, edit `socket_scanner.rs` watch patterns and `config.rs` socket forwarding fields
+
 ### Adding new host-side actions (e.g., clipboard, notifications)
 - Add a new message type (e.g., `CopyToClipboard`)
 - Handle in `host/mod.rs` `handle_container_messages()` match arm
@@ -231,6 +282,12 @@ These MUST be maintained in all changes:
 7. **No command injection** — URLs passed as arguments to `open`/`xdg-open` via `Command::new().arg()`, never via shell interpolation.
 8. **No `unsafe` blocks** — no exceptions.
 9. **Resource limits** — Max 64 containers (`MAX_CONTAINERS`), max 128 forwards per container (`MAX_FORWARDS_PER_CONTAINER`), max 1024 pending connections (`MAX_PENDING`).
+10. **Token authentication** — Random 64-char hex token required on Register (configurable via `--no-auth`). Token stored at `~/.config/dbr/auth-token` with 0600 perms. Container daemon resolves token via `--auth-token` flag, `DCBRIDGE_AUTH_TOKEN` env var, or `--auth-token-file` path.
+11. **Socket path allowlist** — Only sockets matching configured `watch_paths` globs are forwarded. Default empty (no sockets forwarded unless explicitly configured).
+12. **No symlink following in scanner** — Socket scanner uses `lstat` (`symlink_metadata`), never follows symlinks.
+13. **Socket path length limit** — 108 characters maximum (Unix `sun_path` limit).
+14. **Mirror socket permissions** — Container mirror sockets created with mode 0600.
+15. **Max socket forwards** — Default 16 per scanner (configurable via `max_sockets`).
 
 ---
 
