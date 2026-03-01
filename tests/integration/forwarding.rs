@@ -1454,4 +1454,139 @@ mod socket_scanner_tests {
         drop(conn2);
         host_handle.abort();
     }
+
+    // -----------------------------------------------------------------------
+    // Test 22: SocketConnectRequest bridges data through host Unix socket
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_socket_connect_request_bridges_data() {
+        use tokio::net::UnixListener;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let control_port = find_free_port().await;
+        let data_port = find_free_port().await;
+
+        // 1. Create a Unix echo server on the host
+        let sock_path = tmp.path().join("echo.sock");
+        let unix_listener = UnixListener::bind(&sock_path).unwrap();
+
+        let echo_handle = tokio::spawn(async move {
+            loop {
+                match unix_listener.accept().await {
+                    Ok((mut stream, _)) => {
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 4096];
+                            loop {
+                                let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+                                    .await
+                                {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => n,
+                                };
+                                if tokio::io::AsyncWriteExt::write_all(&mut stream, &buf[..n])
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // 2. Start host daemon with socket scanning watching the tmp dir
+        let config = host_config_with_socket_scanning(control_port, data_port, tmp.path(), 100);
+
+        let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+        wait_port_open(control_port, Duration::from_secs(5)).await;
+
+        let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+        let mut conn = register_container(control_addr, "socket-bridge-test", "test-host").await;
+
+        // 3. Wait for SocketForward
+        let socket_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = conn.recv().await.unwrap();
+                match msg {
+                    Message::Ping => {
+                        let _ = conn.send(&Message::Pong).await;
+                        continue;
+                    }
+                    Message::SocketForward { socket_id, .. } => return socket_id,
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("should receive SocketForward within timeout");
+
+        // 4. Send SocketConnectRequest
+        let conn_id = "socket-conn-001".to_string();
+        conn.send(&Message::SocketConnectRequest {
+            socket_id: socket_id.clone(),
+            conn_id: conn_id.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Small delay to let the host process the request and connect to the Unix socket
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // 5. Open a data connection to the host data port and send ConnectReady
+        let data_addr: SocketAddr = ([127, 0, 0, 1], data_port).into();
+        let mut data_stream = TcpStream::connect(data_addr).await.unwrap();
+
+        let ready_line = serde_json::to_string(&Message::ConnectReady {
+            conn_id: conn_id.clone(),
+        })
+        .unwrap();
+        data_stream
+            .write_all(format!("{ready_line}\n").as_bytes())
+            .await
+            .unwrap();
+        data_stream.flush().await.unwrap();
+
+        // 6. Write data through the bridge and verify echo response
+        let test_data = b"Hello through socket bridge!";
+        data_stream.write_all(test_data).await.unwrap();
+        data_stream.flush().await.unwrap();
+
+        let mut response = vec![0u8; test_data.len()];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            data_stream.read_exact(&mut response),
+        )
+        .await
+        .expect("should receive echo within timeout")
+        .expect("read should succeed");
+
+        assert_eq!(&response, test_data, "echo response should match sent data");
+
+        // Send a second message to verify ongoing bidirectional flow
+        let test_data_2 = b"Second socket bridge message";
+        data_stream.write_all(test_data_2).await.unwrap();
+        data_stream.flush().await.unwrap();
+
+        let mut response_2 = vec![0u8; test_data_2.len()];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            data_stream.read_exact(&mut response_2),
+        )
+        .await
+        .expect("should receive second echo within timeout")
+        .expect("second read should succeed");
+
+        assert_eq!(&response_2, test_data_2);
+
+        // 7. Clean up
+        drop(data_stream);
+        drop(conn);
+        echo_handle.abort();
+        host_handle.abort();
+    }
 }

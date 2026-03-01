@@ -1099,6 +1099,99 @@ async fn dispatch_container_message(
             Ok(true)
         }
 
+        #[cfg(unix)]
+        Message::SocketConnectRequest { socket_id, conn_id } => {
+            // Validate conn_id format
+            if conn_id.is_empty() || conn_id.len() > MAX_CONN_ID_LENGTH {
+                warn!(container_id, %conn_id, "invalid conn_id in SocketConnectRequest");
+                return Ok(false);
+            }
+
+            // Look up socket_id in HostState.socket_forwards
+            let host_path = {
+                let state = ctx.state.lock().await;
+                state
+                    .socket_forwards
+                    .get(&socket_id)
+                    .map(|info| info.host_path.clone())
+            };
+
+            let Some(host_path) = host_path else {
+                warn!(container_id, %socket_id, "unknown socket_id in SocketConnectRequest");
+                let _ = conn
+                    .send(&Message::ConnectFailed {
+                        conn_id,
+                        error: format!("unknown socket_id: {socket_id}"),
+                    })
+                    .await;
+                return Ok(false);
+            };
+
+            // Register pending connection for data channel handshake
+            let data_rx = match register_pending(&ctx.pending, conn_id.clone()).await {
+                Some(rx) => rx,
+                None => {
+                    warn!(container_id, %conn_id, "pending connections at capacity");
+                    return Ok(false);
+                }
+            };
+
+            // Connect to the host Unix socket
+            let unix_stream = match tokio::net::UnixStream::connect(&host_path).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!(
+                        container_id,
+                        %socket_id,
+                        path = %host_path.display(),
+                        error = %e,
+                        "failed to connect to host socket"
+                    );
+                    proxy::cancel_pending(&ctx.pending, &conn_id).await;
+                    let _ = conn
+                        .send(&Message::ConnectFailed {
+                            conn_id,
+                            error: format!("host socket connect failed: {e}"),
+                        })
+                        .await;
+                    return Ok(false);
+                }
+            };
+
+            // Spawn bridge task — waits for data channel ConnectReady, then bridges
+            let pending = ctx.pending.clone();
+            let bridge_conn_id = conn_id.clone();
+            tokio::spawn(async move {
+                match bridge_connection(bridge_conn_id.clone(), unix_stream, data_rx, &pending)
+                    .await
+                {
+                    Ok((c2h, h2c)) => {
+                        debug!(
+                            conn_id = %bridge_conn_id,
+                            client_to_host = c2h,
+                            host_to_client = h2c,
+                            "socket bridge completed"
+                        );
+                    }
+                    Err(e) => {
+                        debug!(
+                            conn_id = %bridge_conn_id,
+                            error = %e,
+                            "socket bridge failed"
+                        );
+                    }
+                }
+            });
+
+            info!(
+                container_id,
+                %socket_id,
+                %conn_id,
+                "socket connect request accepted, bridging"
+            );
+            Ok(false)
+        }
+
         other => {
             debug!(container_id, message = ?other, "ignoring unexpected message");
             Ok(false)
