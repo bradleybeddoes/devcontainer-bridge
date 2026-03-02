@@ -219,6 +219,86 @@ the host daemon.
 
 ---
 
+## Chrome for Claude in Devcontainers
+
+Claude Code's "Chrome for Claude" feature lets Claude read browser tabs, take
+screenshots, and navigate pages. This requires the Chrome extension on the host
+and the MCP server inside the container to communicate. `dbr` bridges this gap
+via Unix socket forwarding.
+
+> See [Chrome for Claude Integration](claude-chrome-integration.md) for the
+> full technical deep-dive.
+
+### Prerequisites
+
+- Chrome running on the host with the Claude Code extension installed
+- `dbr` socket forwarding enabled (see [Unix Socket Forwarding](#unix-socket-forwarding) above)
+- Claude Code installed inside the container
+
+### 1. Configure socket forwarding
+
+Add the native host socket pattern to `~/.config/dbr/config.toml`:
+
+```toml
+[socket_forwarding]
+watch_paths = ["/tmp/claude-mcp-browser-bridge-*/*.sock"]
+```
+
+### 2. Create the username symlink
+
+The native host creates sockets under your host username, but Claude Code in
+the container looks under the container username. Create a symlink inside the
+container:
+
+```bash
+# In your container's shell profile or entrypoint
+HOST_USER="$(ls /tmp/claude-mcp-browser-bridge-* -d 2>/dev/null | head -1 | xargs basename | sed 's/claude-mcp-browser-bridge-//')"
+CONTAINER_USER="$(whoami)"
+if [ -n "$HOST_USER" ] && [ "$HOST_USER" != "$CONTAINER_USER" ]; then
+    ln -sfn "/tmp/claude-mcp-browser-bridge-$HOST_USER" "/tmp/claude-mcp-browser-bridge-$CONTAINER_USER"
+fi
+```
+
+### 3. Add the Claude Code wrapper
+
+Claude Code defaults to a cloud WebSocket bridge for Chrome communication,
+which doesn't work from containers. This wrapper forces the local socket path:
+
+```bash
+# Add to your container shell profile (.zshrc / .bashrc)
+claude-chrome() {
+  python3 -c "
+import json
+f = '$HOME/.claude.json'
+try:
+    d = json.load(open(f))
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+d.setdefault('cachedGrowthBookFeatures', {})['tengu_copper_bridge'] = False
+json.dump(d, open(f, 'w'), indent=2)
+" 2>/dev/null
+  command claude "$@"
+}
+```
+
+Then launch Claude Code with `claude-chrome` instead of `claude`.
+
+### 4. Verify
+
+```bash
+# Check socket forwarding is active
+dbr status
+
+# Should show something like:
+# Socket Forwards
+# Host Path                                          Container Path
+# /tmp/claude-mcp-browser-bridge-user/12345.sock     /tmp/claude-mcp-browser-bridge-user/12345.sock
+
+# In Claude Code, the Chrome for Claude indicator should show "connected"
+```
+
+---
+
 ## Checking Status with `dbr status`
 
 See what ports are currently forwarded:
