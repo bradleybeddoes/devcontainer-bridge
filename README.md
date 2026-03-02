@@ -267,7 +267,7 @@ Add watch patterns to `~/.config/dbr/config.toml`:
 
 ```toml
 [socket_forwarding]
-watch_paths = ["/tmp/*.sock", "/run/user/1000/gnupg/S.gpg-agent"]
+watch_paths = ["/tmp/claude-mcp-browser-bridge-*/*.sock", "/tmp/*.sock", "/run/user/1000/gnupg/S.gpg-agent"]
 scan_interval_ms = 5000
 max_socket_forwards = 16
 container_path_prefix = "/tmp"
@@ -354,6 +354,7 @@ On Apple Silicon macOS, `cross` does not work reliably for `aarch64-unknown-linu
 - [CLI Developer Guide](docs/cli-guide.md) — terminal workflow setup, troubleshooting
 - [Team Adoption Guide](docs/team-guide.md) — adding to shared configs, VS Code compatibility FAQ
 - [Development Guide](docs/development.md) — building, testing, debugging, and iterating on `dbr`
+- [Chrome for Claude Integration](docs/claude-chrome-integration.md) — using Chrome for Claude from devcontainers
 
 ## License
 
