@@ -82,7 +82,67 @@ configuration, not in any shared project file.
 
 ---
 
+## Authentication Setup
+
+`dbr` uses a shared-secret token to authenticate container daemon registrations.
+The token is generated automatically on first run and stored at
+`~/.config/dbr/auth-token`.
+
+### When using the devcontainer feature
+
+If the developer's home directory is mounted into the container (the default
+for most devcontainer setups), the token file is shared automatically. No
+additional configuration is needed.
+
+### When home directories are not shared
+
+Pass the token via environment variable in `devcontainer.json`:
+
+```jsonc
+{
+  "containerEnv": {
+    "DCBRIDGE_AUTH_TOKEN": "${localEnv:DCBRIDGE_AUTH_TOKEN}"
+  }
+}
+```
+
+Or share the token file via a bind mount. The token is per-developer (stored in
+their home directory), not per-project.
+
+### Disabling authentication
+
+For development environments where security is not a concern:
+
+```bash
+dbr ensure --no-auth
+```
+
+This starts the host daemon without token validation.
+
+---
+
 ## FAQ
+
+### How does authentication work?
+
+Each developer has a unique token at `~/.config/dbr/auth-token`, generated on
+first run. The container daemon presents this token when registering with the
+host. If the token does not match, the connection is rejected. The token is
+personal -- it is not committed to the repository or shared in `devcontainer.json`.
+
+### Can we forward Unix sockets into containers?
+
+Yes. Socket forwarding is an optional feature configured per-developer in
+`~/.config/dbr/config.toml`. Add glob patterns for the sockets you want to
+forward:
+
+```toml
+[socket_forwarding]
+watch_paths = ["/tmp/*.sock"]
+```
+
+This is personal configuration -- it does not affect shared project files or
+other team members.
 
 ### Does this conflict with VS Code port forwarding?
 

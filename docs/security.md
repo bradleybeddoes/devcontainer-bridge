@@ -17,7 +17,7 @@ This document describes the threat model, security guarantees, and audit guidanc
 - **Malicious code on the host.** If an attacker has code execution on the host, they can already access anything on loopback. `dbr` does not make this worse.
 - **Container-to-container isolation.** Containers are isolated by Docker networking. `dbr` does not create cross-container communication paths.
 - **Encrypted transport.** The control and data channels use plaintext TCP on loopback. Since both endpoints are on the same machine (or within the Docker Desktop VM), TLS is unnecessary — the same trust boundary as Docker Desktop port publishing, `kubectl port-forward`, and SSH `-L` tunnels.
-- **Authentication between daemons.** Any process on the host can connect to the control port. This matches the security model of Docker Desktop (any local process can talk to the Docker socket) and `kubectl` (any local process can use the forwarded port).
+- **Authentication bypass.** Token authentication secures the control channel against unauthorized registrations. Disabling it with `--no-auth` is intended only for local development and testing.
 
 ## Two-Tier Binding Model
 
@@ -82,6 +82,72 @@ The two-tier approach follows established patterns:
 
 On a typical developer workstation, the control and data ports accept only the `dbr` protocol (not arbitrary user traffic), making network exposure low-risk. Forwarded ports, which expose actual container services, remain loopback-only.
 
+## Token Authentication
+
+The control channel is protected by a shared-secret token that must be presented on every `Register` message.
+
+### Token lifecycle
+
+1. **Generation** — On first run, `dbr ensure` (or `dbr host-daemon`) generates a random 64-character hex token using the OS CSPRNG (`getrandom`).
+2. **Storage** — The token is written to `~/.config/dbr/auth-token` with file mode `0600` (owner read/write only).
+3. **Validation** — When a container sends `Register`, the host daemon compares the provided `auth_token` against its own token. Mismatches result in `RegisterAck{success: false}` and the connection is closed.
+
+### Token resolution chain
+
+Both daemons and CLI commands resolve the token using the same precedence:
+
+| Priority | Source |
+|----------|--------|
+| 1 | `--auth-token <TOKEN>` CLI flag |
+| 2 | `DCBRIDGE_AUTH_TOKEN` environment variable |
+| 3 | `--auth-token-file <PATH>` CLI flag |
+| 4 | Default file: `~/.config/dbr/auth-token` |
+
+### Disabling authentication
+
+Pass `--no-auth` to `dbr host-daemon` or `dbr ensure` to accept any `Register` regardless of token. This is intended for local development and testing only.
+
+### Devcontainer feature integration
+
+The devcontainer feature's entrypoint script reads the auth token from the default file path. When the host and container share the same home directory mount (common in devcontainer setups), no additional configuration is needed.
+
+For containers without a shared home directory, pass the token via environment variable:
+
+```bash
+# In devcontainer.json or docker-compose.yml
+"containerEnv": {
+  "DCBRIDGE_AUTH_TOKEN": "${localEnv:DCBRIDGE_AUTH_TOKEN}"
+}
+```
+
+## Unix Socket Forwarding Security
+
+Unix socket forwarding bridges host-side sockets into containers. Several controls limit the attack surface.
+
+### Path allowlist
+
+Only sockets matching the configured `watch_paths` glob patterns are forwarded. The default configuration has an empty `watch_paths` list, meaning **no sockets are forwarded unless explicitly configured**.
+
+### Symlink protection
+
+The socket scanner uses `lstat` (`symlink_metadata` in Rust) and never follows symlinks. A symlink pointing to a socket outside the watch path is ignored. This prevents symlink-based path traversal attacks.
+
+### Path length limit
+
+Socket paths are limited to 108 characters (the Unix `sun_path` limit). Paths exceeding this are rejected.
+
+### Mirror socket permissions
+
+Container-side mirror sockets are created with file mode `0600` (owner read/write only). Other users in the container cannot connect to forwarded sockets.
+
+### Resource limits
+
+| Limit | Default | Configurable |
+|-------|---------|-------------|
+| Max forwarded sockets | 16 | `max_sockets` in config TOML |
+| Scan interval | 5s | `scan_interval_secs` in config TOML |
+| Socket path length | 108 chars | No (Unix kernel limit) |
+
 ## URL Validation
 
 When a container sends an `OpenUrl` message, the host daemon validates the URL before passing it to `open` (macOS) or `xdg-open` (Linux).
@@ -136,6 +202,8 @@ Every control message is bounded to **64 KB** (`MAX_MESSAGE_SIZE` in `src/contro
 | ConnectRequest timeout | 10 sec | `src/host/proxy.rs:20` |
 | Heartbeat interval | 30 sec | `src/host/mod.rs:38` |
 | Missed pongs before disconnect | 3 | `src/host/mod.rs:41` |
+| Max forwarded sockets | 16 | `config.toml` `[socket_forwarding]` |
+| Socket path length | 108 chars | Unix `sun_path` limit |
 
 ### Heartbeat and dead connection detection
 
@@ -207,6 +275,8 @@ The project uses a focused set of well-maintained crates:
 | `tracing` + `tracing-subscriber` | Structured logging |
 | `thiserror` | Error types |
 | `uuid` | Connection ID generation |
+| `getrandom` | Cryptographic random token generation |
+| `glob` | Unix socket path pattern matching |
 
 ## Verification Commands
 

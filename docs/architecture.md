@@ -51,13 +51,14 @@ All control messages are serialized as **JSON lines** (newline-delimited JSON) u
 Sent as the first message after TCP connect. Identifies the container to the host daemon.
 
 ```json
-{"type":"Register","container_id":"abc123def","hostname":"dev"}
+{"type":"Register","container_id":"abc123def","hostname":"dev","auth_token":"a1b2c3...64chars"}
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `container_id` | string | Unique identifier for the container. Typically the Docker container short ID, read from `/etc/hostname`. |
 | `hostname` | string | Human-readable hostname for display in `dbr status`. |
+| `auth_token` | string | Authentication token. Validated against the host's token. Defaults to empty string for backwards compatibility with older clients. |
 
 #### RegisterAck
 
@@ -193,6 +194,53 @@ Keepalive heartbeat. The host sends `Ping` every 30 seconds. If 3 consecutive po
 
 No additional fields.
 
+#### SocketForward
+
+**Direction:** Host to Container (Unix only)
+
+Instructs the container to create a mirror Unix socket and forward connections back to the host.
+
+```json
+{"type":"SocketForward","socket_id":"sock-abc123","host_path":"/tmp/test.sock","container_path":"/tmp/test.sock"}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `socket_id` | string | Unique identifier for this socket forward. |
+| `host_path` | string | Absolute path of the socket on the host. |
+| `container_path` | string | Absolute path where the mirror socket should be created in the container. |
+
+#### SocketUnforward
+
+**Direction:** Host to Container (Unix only)
+
+Instructs the container to stop listening on a mirror socket and remove the socket file.
+
+```json
+{"type":"SocketUnforward","socket_id":"sock-abc123"}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `socket_id` | string | The identifier from the original `SocketForward`. |
+
+#### SocketConnectRequest
+
+**Direction:** Container to Host (Unix only)
+
+Sent when a client connects to a mirror socket in the container. The host should connect to the original Unix socket and prepare for a reverse data connection.
+
+```json
+{"type":"SocketConnectRequest","socket_id":"sock-abc123","conn_id":"550e8400-e29b-41d4-a716-446655440000"}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `socket_id` | string | The socket forward identifier. |
+| `conn_id` | string | UUID v4 for correlating the `ConnectReady` on the data channel. |
+
+The data connection reuses the same `ConnectReady`/`ConnectFailed` handshake as TCP port forwarding.
+
 #### ListRequest
 
 **Direction:** CLI to Host
@@ -221,6 +269,13 @@ Requests a snapshot of all active forwards across all containers (used by `dbr s
       "pid": 1234,
       "since": "1707900000"
     }
+  ],
+  "socket_forwards": [
+    {
+      "socket_id": "sock-abc123",
+      "host_path": "/tmp/chrome-debug.sock",
+      "container_path": "/tmp/chrome-debug.sock"
+    }
   ]
 }
 ```
@@ -228,6 +283,7 @@ Requests a snapshot of all active forwards across all containers (used by `dbr s
 | Field | Type | Description |
 |-------|------|-------------|
 | `forwards` | array | List of `ForwardInfo` objects. |
+| `socket_forwards` | array | List of `SocketForwardInfo` objects. Defaults to empty for backwards compatibility. |
 
 Each `ForwardInfo` contains: `container_id`, `hostname`, `port` (container), `host_port`, `protocol`, `process_name` (nullable), `pid` (nullable), `since` (Unix epoch seconds as string).
 
@@ -553,6 +609,9 @@ Default values:
 | Heartbeat interval | 30s |
 | Missed pongs threshold | 3 |
 | Connect timeout | 10s |
+| Socket scan interval | 5s |
+| Max sockets | 16 |
+| Container socket base path | /tmp |
 
 ---
 
@@ -588,6 +647,76 @@ On receiving `OpenUrl`:
 3. **Rate limiting**: sliding window of 1 second, maximum 5 opens per second. Excess requests are rejected.
 4. Opens the URL via `open` (macOS) or `xdg-open` (Linux). The URL is passed as a single process argument (not via shell) to prevent command injection.
 5. Returns `OpenUrlAck{success}`.
+
+---
+
+## Unix Socket Forwarding
+
+The host daemon can forward host-side Unix sockets into containers, enabling tools like SSH agents, Chrome CDP debugging sockets, and GPG agents.
+
+### Socket Scanner
+
+The host daemon runs a glob-based scanner that discovers Unix sockets matching configured `watch_paths` patterns. The scanner:
+
+1. Evaluates each glob pattern against the filesystem using `lstat` (no symlink following).
+2. Filters results to actual Unix sockets (not regular files, directories, or symlinks).
+3. Tracks socket lifecycle: new sockets trigger `SocketForward`, disappeared sockets trigger `SocketUnforward`.
+4. Rewrites host paths to container paths using the configured `container_base_path`.
+
+### Data Flow
+
+```
+Host Scanner          Host Daemon              Container Daemon         Container Client
+    |                    |                         |                        |
+    |-- discover sock -->|                         |                        |
+    |                    |-- SocketForward -------->|                        |
+    |                    |   {socket_id,            |                        |
+    |                    |    host_path,             |                        |
+    |                    |    container_path}        |                        |
+    |                    |                         |-- create UnixListener ->|
+    |                    |                         |   (container_path,      |
+    |                    |                         |    mode 0600)           |
+    |                    |                         |                        |
+    |                    |                         |<-- connect -------------|
+    |                    |                         |   (mirror socket)       |
+    |                    |                         |                        |
+    |                    |<- SocketConnectRequest --|                        |
+    |                    |   {socket_id, conn_id}   |                        |
+    |                    |                         |                        |
+    |                    |-- connect to host sock  |                        |
+    |                    |   (host_path)           |                        |
+    |                    |                         |                        |
+    |                    |                         |--- TCP connect -------->|
+    |                    |                         |   (data channel 19286) |
+    |                    |<-------- ConnectReady ---|                        |
+    |                    |   {conn_id}             |                        |
+    |                    |                         |                        |
+    |                    |<== bidirectional ================================>|
+    |                    |    Unix socket <-> TCP data <-> mirror socket     |
+```
+
+### Configuration
+
+Socket forwarding is configured in `~/.config/dbr/config.toml`:
+
+```toml
+[socket_forwarding]
+watch_paths = ["/tmp/*.sock", "/run/user/1000/gnupg/S.gpg-agent"]
+scan_interval_secs = 5
+max_sockets = 16
+container_base_path = "/tmp"
+```
+
+Or via CLI flags on `dbr host-daemon`:
+
+| Flag | Description |
+|------|-------------|
+| `--socket-watch-paths` | Comma-separated glob patterns |
+| `--socket-container-path-prefix` | Container path prefix |
+| `--socket-scan-interval-ms` | Scan interval in milliseconds |
+| `--no-socket-forwarding` | Disable socket forwarding |
+
+When `watch_paths` is empty (the default), no sockets are forwarded.
 
 ---
 

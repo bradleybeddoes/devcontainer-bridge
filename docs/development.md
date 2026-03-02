@@ -84,6 +84,8 @@ The `scripts/dev-test.sh` script handles this automatically.
 ./target/release/dbr host-daemon --log-level debug
 ```
 
+This generates an auth token at `~/.config/dbr/auth-token` on first run.
+
 The host daemon binds two ports on loopback:
 - Control channel: `127.0.0.1:19285`
 - Data channel: `127.0.0.1:19286`
@@ -103,6 +105,9 @@ CONTAINER="your_project_devcontainer-app-1"
 
 docker cp ./target/release/dbr "$CONTAINER:/usr/local/bin/dbr"
 docker exec -d "$CONTAINER" dbr container-daemon
+
+# If the container doesn't share the host home directory, pass the token:
+docker exec -d "$CONTAINER" dbr container-daemon --auth-token "$(cat ~/.config/dbr/auth-token)"
 ```
 
 ### Verifying
@@ -150,9 +155,9 @@ cleanup trap, even on failure or `Ctrl-C`.
 4. **Pre-flight** -- Verifies the test container can reach the host via
    `host.docker.internal`
 5. **Host daemon tests** -- Starts the host daemon, verifies the control port
-   is listening, checks `dbr status`
+   is listening, verifies auth token generation, checks `dbr status`
 6. **Container daemon tests** -- Starts the container daemon in the test
-   container, verifies registration
+   container, verifies authenticated registration
 7. **Port forwarding tests** -- Starts a TCP listener in the container, waits
    for port detection, verifies the port appears in status, tests data transfer
    through the forwarded port, stops the listener, verifies the port disappears
@@ -480,6 +485,9 @@ forwards. Each entry shows:
   conflict)
 - **Process** -- name of the process listening on the port (if resolvable)
 - **Since** -- how long ago the forward was established
+
+When socket forwarding is configured, `dbr status` also shows active socket
+forwards with host and container paths.
 
 ### How to verify forwarding works
 

@@ -54,7 +54,8 @@ feature's entrypoint, which runs on every container start.
 dbr ensure
 ```
 
-This starts the host daemon if it is not already running. It is idempotent --
+This generates an authentication token at `~/.config/dbr/auth-token` on first
+run and starts the host daemon if it is not already running. It is idempotent --
 running it multiple times is safe.
 
 That's it. The container daemon is already running. Ports that processes bind
@@ -75,6 +76,94 @@ devcontainer up --workspace-folder "$folder"
 
 The container daemon starts automatically via the devcontainer feature — no
 manual launch is needed on either `devcontainer up` or `docker compose restart`.
+
+---
+
+## Authentication
+
+The control channel uses a shared-secret token to prevent unauthorized
+container registrations.
+
+### How it works
+
+1. `dbr ensure` (or `dbr host-daemon`) generates a random 64-character hex
+   token on first run, stored at `~/.config/dbr/auth-token` (mode 0600).
+2. The container daemon reads the token from the same path (via the
+   devcontainer feature's shared home directory) or from `DCBRIDGE_AUTH_TOKEN`.
+3. On `Register`, the host validates the token. Mismatches are rejected.
+
+### Token resolution
+
+Both daemons resolve the token in this order:
+
+1. `--auth-token <TOKEN>` CLI flag
+2. `DCBRIDGE_AUTH_TOKEN` environment variable
+3. `--auth-token-file <PATH>` CLI flag
+4. Default file: `~/.config/dbr/auth-token`
+
+### Without the devcontainer feature
+
+If the container does not share the host's home directory, pass the token
+explicitly:
+
+```bash
+# Via environment variable (recommended for Docker Compose)
+export DCBRIDGE_AUTH_TOKEN="$(cat ~/.config/dbr/auth-token)"
+
+# Via CLI flag
+dbr container-daemon --auth-token-file /path/to/token
+```
+
+### Disabling authentication
+
+For local development and testing:
+
+```bash
+dbr host-daemon --no-auth
+dbr ensure --no-auth
+```
+
+---
+
+## Unix Socket Forwarding
+
+Host-side Unix sockets can be forwarded into containers for tools like SSH
+agents, Chrome CDP debugging sockets, and GPG agents.
+
+### Configuration
+
+Add watch patterns to `~/.config/dbr/config.toml`:
+
+```toml
+[socket_forwarding]
+watch_paths = ["/tmp/*.sock", "/run/user/1000/gnupg/S.gpg-agent"]
+scan_interval_secs = 5
+max_sockets = 16
+container_base_path = "/tmp"
+```
+
+Or pass globs on the command line:
+
+```bash
+dbr host-daemon --socket-watch-paths "/tmp/*.sock,/run/user/1000/**/*.sock"
+```
+
+### Checking socket status
+
+```bash
+dbr status
+```
+
+The output includes a "Socket Forwards" section when sockets are active:
+
+```
+Container       Port   Host Port  Process    Since
+myapp_dev       8080   8080       node       2m ago
+
+Socket Forwards
+Host Path                                          Container Path
+/tmp/chrome-remote-debug.sock                      /tmp/chrome-remote-debug.sock
+```
 
 ---
 
@@ -189,10 +278,20 @@ Run the host-side daemon. Binds control and data ports on loopback.
 |------|---------|-------------|
 | `--control-port` | 19285 | Control channel port |
 | `--data-port` | 19286 | Data channel port |
+| `--bind-addr` | auto-detected | Bind address for control and data ports |
+| `--no-docker-detect` | false | Skip Docker detection, bind to loopback |
 | `--log-level` | info | Log level (trace, debug, info, warn, error) |
 | `--log-format` | text | Log format (text or json) |
 | `--log-file` | -- | Optional file path for log output |
 | `--exit-on-idle` | false | Exit when the last container disconnects |
+| `--browser-cmd` | -- | Custom browser command (overrides `open`/`xdg-open`) |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
+| `--no-auth` | false | Disable token authentication |
+| `--socket-watch-paths` | -- | Comma-separated glob patterns for Unix sockets |
+| `--socket-container-path-prefix` | -- | Prefix for container socket paths |
+| `--socket-scan-interval-ms` | -- | Socket scan interval in milliseconds |
+| `--no-socket-forwarding` | false | Disable socket forwarding |
 
 ### `dbr container-daemon`
 
@@ -206,6 +305,8 @@ Run the container-side daemon inside a devcontainer.
 | `--log-level` | info | Log level (trace, debug, info, warn, error) |
 | `--log-format` | text | Log format (text or json) |
 | `--log-file` | -- | Optional file path for log output |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
 
 ### `dbr ensure`
 
@@ -216,6 +317,9 @@ Start the host daemon if it is not already running. Safe to call repeatedly.
 | `--control-port` | 19285 | Control channel port |
 | `--data-port` | 19286 | Data channel port |
 | `--host` | auto-resolved | Host daemon address (IP or hostname) |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
+| `--no-auth` | false | Disable auth when spawning a new daemon |
 
 ### `dbr status`
 
@@ -226,6 +330,8 @@ Show active port forwards across all containers.
 | `--control-port` | 19285 | Host daemon control port |
 | `--host` | auto-resolved | Host daemon address (IP or hostname) |
 | `--json` | false | Output as JSON |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
 
 ### `dbr forward <PORT>`
 
@@ -235,6 +341,8 @@ Manually forward a container port.
 |------|---------|-------------|
 | `--control-port` | 19285 | Host daemon control port |
 | `--host` | auto-resolved | Host daemon address (IP or hostname) |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
 
 ### `dbr unforward <PORT>`
 
@@ -244,10 +352,18 @@ Manually remove a port forward.
 |------|---------|-------------|
 | `--control-port` | 19285 | Host daemon control port |
 | `--host` | auto-resolved | Host daemon address (IP or hostname) |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
 
 ### `dbr open <URL>`
 
 Open a URL in the host browser. Only `http://` and `https://` URLs are accepted.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--control-port` | 19285 | Host daemon control port |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
 
 ---
 
@@ -381,6 +497,45 @@ fi
 
 These rules must be added **before** the default DROP policy. If you use
 non-default ports (`--control-port` / `--data-port`), adjust accordingly.
+
+### Auth token mismatch
+
+If the container daemon fails to register with "authentication failed":
+
+1. Verify the token matches on both sides:
+   ```bash
+   # Host
+   cat ~/.config/dbr/auth-token
+
+   # Container
+   docker exec "$CONTAINER" cat ~/.config/dbr/auth-token
+   ```
+2. If tokens differ, copy the host token to the container or pass it via
+   environment variable:
+   ```bash
+   export DCBRIDGE_AUTH_TOKEN="$(cat ~/.config/dbr/auth-token)"
+   ```
+3. For testing, disable authentication:
+   ```bash
+   dbr host-daemon --no-auth
+   ```
+
+### Socket not forwarded
+
+If a host socket is not appearing in the container:
+
+1. Verify `watch_paths` in `~/.config/dbr/config.toml` includes a matching glob.
+2. Check that the socket exists on the host:
+   ```bash
+   ls -la /tmp/*.sock
+   ```
+3. Check `dbr status` for the socket forwards section.
+4. Verify the host daemon was started with socket forwarding enabled
+   (not `--no-socket-forwarding`).
+5. Check host daemon logs for socket scan activity:
+   ```bash
+   dbr host-daemon --log-level debug
+   ```
 
 ### Checking logs
 
