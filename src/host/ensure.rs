@@ -1,8 +1,11 @@
-//! Idempotent host daemon startup logic.
+//! Idempotent host daemon startup logic and stop/restart support.
 //!
 //! `dbr ensure` checks if a host daemon is already running and starts one
 //! if not. Used by shell aliases like `dcup` to guarantee the host daemon
 //! is available before launching a devcontainer.
+//!
+//! `dbr stop` sends a `Shutdown` message to a running host daemon.
+//! `dbr restart` combines stop + ensure.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -11,6 +14,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, info};
 
+use crate::auth;
 use crate::control;
 use crate::protocol::Message;
 
@@ -51,6 +55,13 @@ pub enum EnsureError {
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The host daemon is not running (for stop).
+    #[error("host daemon is not running on port {port}")]
+    NotRunning {
+        /// The port that was checked.
+        port: u16,
+    },
 }
 
 /// Run the `ensure` subcommand: start the host daemon if not already running.
@@ -108,6 +119,25 @@ pub async fn run_ensure(
     }
     debug!(port = control_port, "no daemon listening, spawning");
 
+    // Ensure auth token file exists before spawning.
+    // This fixes the case where a pre-auth daemon was running and the user
+    // upgrades: the old daemon is killed, but `ensure` needs to create the
+    // token file before spawning the new daemon (since the daemon's stderr
+    // is /dev/null and token generation errors would be hidden).
+    let spawn_token = if no_auth {
+        None
+    } else if auth_token.is_some() || auth_token_file.is_some() {
+        // User provided explicit token — pass through as-is
+        None
+    } else {
+        // No explicit token — ensure the default file exists
+        let default_path =
+            auth::token_file_path().map_err(|e| EnsureError::SpawnFailed(format!("auth: {e}")))?;
+        let token = auth::ensure_token(&default_path)
+            .map_err(|e| EnsureError::SpawnFailed(format!("auth: {e}")))?;
+        Some(token)
+    };
+
     // Step 2: Spawn the host daemon as a background process
     let exe = std::env::current_exe().map_err(|e| EnsureError::SpawnFailed(e.to_string()))?;
 
@@ -130,6 +160,8 @@ pub async fn run_ensure(
     if no_auth {
         cmd.arg("--no-auth");
     } else if let Some(ref token) = auth_token {
+        cmd.arg("--auth-token").arg(token);
+    } else if let Some(ref token) = spawn_token {
         cmd.arg("--auth-token").arg(token);
     } else if let Some(ref path) = auth_token_file {
         cmd.arg("--auth-token-file").arg(path);
@@ -172,6 +204,43 @@ pub async fn run_ensure(
             }
         }
     }
+}
+
+/// Stop a running host daemon by sending a `Shutdown` message.
+///
+/// Connects to `host:control_port`, sends `Shutdown` with the auth token,
+/// and waits for the daemon to close the connection (up to 5s).
+///
+/// # Errors
+///
+/// Returns [`EnsureError::NotRunning`] if no daemon is listening.
+/// Returns [`EnsureError::PortConflict`] if something is listening but
+/// does not behave like a dbr daemon.
+pub async fn run_stop(
+    host: IpAddr,
+    control_port: u16,
+    auth_token: String,
+) -> Result<(), EnsureError> {
+    let addr: SocketAddr = (host, control_port).into();
+
+    let mut conn = control::connect(addr)
+        .await
+        .map_err(|_| EnsureError::NotRunning { port: control_port })?;
+
+    conn.send(&Message::Shutdown { auth_token })
+        .await
+        .map_err(|_| EnsureError::NotRunning { port: control_port })?;
+
+    // Wait for the daemon to close the connection (indicates shutdown started)
+    let _ = tokio::time::timeout(Duration::from_secs(5), conn.recv()).await;
+
+    // Remove PID file
+    if let Err(e) = remove_pid_file() {
+        debug!(error = %e, "could not remove PID file (non-fatal)");
+    }
+
+    println!("Host daemon stopped.");
+    Ok(())
 }
 
 /// Remove the daemon PID file (`~/.config/dbr/daemon.pid`).

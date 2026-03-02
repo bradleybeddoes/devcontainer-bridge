@@ -300,4 +300,58 @@ BROWSER INTEGRATION:
         #[arg(long)]
         no_auth: bool,
     },
+
+    /// Stop a running host daemon.
+    #[command(name = "stop")]
+    Stop {
+        /// Control channel port.
+        #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
+        control_port: u16,
+
+        /// Host daemon address (IP or hostname).
+        ///
+        /// When omitted, auto-resolves via DCBRIDGE_HOST env var,
+        /// then host.docker.internal DNS, then 127.0.0.1.
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Authentication token for the control channel.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
+    },
+
+    /// Restart the host daemon (stop + ensure).
+    #[command(name = "restart")]
+    Restart {
+        /// Control channel port.
+        #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
+        control_port: u16,
+
+        /// Data channel port.
+        #[arg(long, default_value_t = DEFAULT_DATA_PORT)]
+        data_port: u16,
+
+        /// Host daemon address (IP or hostname).
+        ///
+        /// When omitted, auto-resolves via DCBRIDGE_HOST env var,
+        /// then host.docker.internal DNS, then 127.0.0.1.
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Authentication token for the control channel.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
+
+        /// Disable authentication when spawning a new daemon.
+        #[arg(long)]
+        no_auth: bool,
+    },
 }

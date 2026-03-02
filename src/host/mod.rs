@@ -918,6 +918,18 @@ async fn handle_control_connection(
             conn.send(&Message::OpenUrlAck { success }).await?;
             Ok(())
         }
+        Message::Shutdown { auth_token } => {
+            // Validate auth token when auth is enabled
+            if let Some(ref expected) = ctx.auth_token {
+                if auth_token != *expected {
+                    warn!(%addr, "shutdown rejected: invalid auth token");
+                    return Ok(());
+                }
+            }
+            info!("shutdown requested via control channel");
+            let _ = shutdown_signal.send(()).await;
+            Ok(())
+        }
         other => {
             warn!(%addr, message = ?other, "unexpected first message, expected Register or ListRequest");
             Ok(())

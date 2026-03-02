@@ -144,8 +144,8 @@ Container-side mirror sockets are created with file mode `0600` (owner read/writ
 
 | Limit | Default | Configurable |
 |-------|---------|-------------|
-| Max forwarded sockets | 16 | `max_sockets` in config TOML |
-| Scan interval | 5s | `scan_interval_secs` in config TOML |
+| Max forwarded sockets | 16 | `max_socket_forwards` in config TOML |
+| Scan interval | 5000ms | `scan_interval_ms` in config TOML |
 | Socket path length | 108 chars | No (Unix kernel limit) |
 
 ## URL Validation

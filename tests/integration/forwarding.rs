@@ -1216,6 +1216,120 @@ async fn test_ping_pong_without_auth() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 19: Shutdown message stops the host daemon
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_shutdown_stops_daemon() {
+    let control_port = find_free_port().await;
+    let data_port = find_free_port().await;
+
+    let config = HostConfig {
+        control_port,
+        data_port,
+        exit_on_idle: false,
+        bind_addr: Some(Ipv4Addr::LOCALHOST.into()),
+        ..HostConfig::default()
+    };
+
+    let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+    wait_port_open(control_port, Duration::from_secs(5)).await;
+
+    let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+
+    // Send Shutdown message
+    let mut conn = control::connect(control_addr).await.unwrap();
+    conn.send(&Message::Shutdown {
+        auth_token: String::new(),
+    })
+    .await
+    .unwrap();
+
+    // The daemon should exit — the handle should complete within a few seconds
+    let result = tokio::time::timeout(Duration::from_secs(5), host_handle).await;
+    assert!(
+        result.is_ok(),
+        "host daemon should have stopped after Shutdown"
+    );
+    // The daemon should exit cleanly (Ok(()))
+    let inner = result.unwrap().unwrap();
+    assert!(inner.is_ok(), "host daemon should exit without error");
+}
+
+// ---------------------------------------------------------------------------
+// Test 20: Shutdown rejected with wrong auth token
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_shutdown_rejected_bad_token() {
+    let control_port = find_free_port().await;
+    let data_port = find_free_port().await;
+    let token = "a".repeat(64);
+
+    let config = host_config_with_auth(control_port, data_port, &token);
+    let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+    wait_port_open(control_port, Duration::from_secs(5)).await;
+
+    let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+
+    // Send Shutdown with wrong token
+    let mut conn = control::connect(control_addr).await.unwrap();
+    conn.send(&Message::Shutdown {
+        auth_token: "b".repeat(64),
+    })
+    .await
+    .unwrap();
+    drop(conn);
+
+    // Daemon should still be running — verify with a Ping
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut conn2 = control::connect(control_addr).await.unwrap();
+    conn2.send(&Message::Ping).await.unwrap();
+    let response = conn2.recv().await.unwrap();
+    assert_eq!(response, Message::Pong, "daemon should still be running");
+
+    drop(conn2);
+    host_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Test 21: Shutdown with correct auth token
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_shutdown_accepted_correct_token() {
+    let control_port = find_free_port().await;
+    let data_port = find_free_port().await;
+    let token = "a".repeat(64);
+
+    let config = host_config_with_auth(control_port, data_port, &token);
+    let host_handle = tokio::spawn(async move { dbr::host::run(config).await });
+
+    wait_port_open(control_port, Duration::from_secs(5)).await;
+
+    let control_addr: SocketAddr = ([127, 0, 0, 1], control_port).into();
+
+    // Send Shutdown with correct token
+    let mut conn = control::connect(control_addr).await.unwrap();
+    conn.send(&Message::Shutdown {
+        auth_token: token.clone(),
+    })
+    .await
+    .unwrap();
+
+    // The daemon should exit
+    let result = tokio::time::timeout(Duration::from_secs(5), host_handle).await;
+    assert!(
+        result.is_ok(),
+        "host daemon should have stopped after Shutdown"
+    );
+    let inner = result.unwrap().unwrap();
+    assert!(inner.is_ok(), "host daemon should exit without error");
+}
+
+// ---------------------------------------------------------------------------
 // Socket scanner integration tests (Unix only)
 // ---------------------------------------------------------------------------
 

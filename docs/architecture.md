@@ -661,7 +661,7 @@ The host daemon runs a glob-based scanner that discovers Unix sockets matching c
 1. Evaluates each glob pattern against the filesystem using `lstat` (no symlink following).
 2. Filters results to actual Unix sockets (not regular files, directories, or symlinks).
 3. Tracks socket lifecycle: new sockets trigger `SocketForward`, disappeared sockets trigger `SocketUnforward`.
-4. Rewrites host paths to container paths using the configured `container_base_path`.
+4. Rewrites host paths to container paths using the configured `container_path_prefix`.
 
 ### Data Flow
 
@@ -702,9 +702,9 @@ Socket forwarding is configured in `~/.config/dbr/config.toml`:
 ```toml
 [socket_forwarding]
 watch_paths = ["/tmp/*.sock", "/run/user/1000/gnupg/S.gpg-agent"]
-scan_interval_secs = 5
-max_sockets = 16
-container_base_path = "/tmp"
+scan_interval_ms = 5000
+max_socket_forwards = 16
+container_path_prefix = "/tmp"
 ```
 
 Or via CLI flags on `dbr host-daemon`:

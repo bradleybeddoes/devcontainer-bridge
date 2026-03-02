@@ -281,6 +281,16 @@ pub enum Message {
         /// Unique connection identifier (UUID).
         conn_id: String,
     },
+
+    /// Request the host daemon to shut down gracefully.
+    ///
+    /// Sent as the first (and only) message on a control connection.
+    /// Requires a valid auth token unless the daemon is running with `--no-auth`.
+    Shutdown {
+        /// Authentication token. Validated against the host's token.
+        #[serde(default)]
+        auth_token: String,
+    },
 }
 
 /// Serialize a message to a JSON string (without trailing newline).
@@ -705,6 +715,30 @@ mod tests {
         assert!(json.contains(r#""type":"SocketUnforward""#));
         let decoded = deserialize_message(&json).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn roundtrip_shutdown() {
+        let msg = Message::Shutdown {
+            auth_token: "a".repeat(64),
+        };
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains(r#""type":"Shutdown""#));
+        assert!(json.contains(r#""auth_token""#));
+        let decoded = deserialize_message(&json).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn shutdown_without_auth_token_deserializes_with_default() {
+        let json = r#"{"type":"Shutdown"}"#;
+        let msg = deserialize_message(json).unwrap();
+        match msg {
+            Message::Shutdown { auth_token } => {
+                assert_eq!(auth_token, "");
+            }
+            _ => panic!("expected Shutdown"),
+        }
     }
 
     #[cfg(unix)]

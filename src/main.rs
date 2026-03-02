@@ -356,6 +356,49 @@ fn main() -> ExitCode {
                 .await
             })
         }
+
+        Command::Stop {
+            control_port,
+            host,
+            auth_token,
+            auth_token_file,
+        } => {
+            init_tracing("warn", "text", None);
+            let token = resolve_cli_auth_token(&auth_token, &auth_token_file);
+            run_async(async {
+                let host = resolve_cli_host(host).await;
+                dbr::host::ensure::run_stop(host, control_port, token).await
+            })
+        }
+
+        Command::Restart {
+            control_port,
+            data_port,
+            host,
+            auth_token,
+            auth_token_file,
+            no_auth,
+        } => {
+            init_tracing("warn", "text", None);
+            let token = resolve_cli_auth_token(&auth_token, &auth_token_file);
+            run_async(async {
+                let host = resolve_cli_host(host).await;
+                // Stop (ignore "not running" errors)
+                let _ = dbr::host::ensure::run_stop(host, control_port, token).await;
+                // Small delay for port release
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // Start
+                dbr::host::ensure::run_ensure(
+                    host,
+                    control_port,
+                    data_port,
+                    no_auth,
+                    auth_token,
+                    auth_token_file,
+                )
+                .await
+            })
+        }
     }
 }
 

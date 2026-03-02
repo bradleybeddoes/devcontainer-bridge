@@ -137,9 +137,9 @@ Add watch patterns to `~/.config/dbr/config.toml`:
 ```toml
 [socket_forwarding]
 watch_paths = ["/tmp/*.sock", "/run/user/1000/gnupg/S.gpg-agent"]
-scan_interval_secs = 5
-max_sockets = 16
-container_base_path = "/tmp"
+scan_interval_ms = 5000
+max_socket_forwards = 16
+container_path_prefix = "/tmp"
 ```
 
 Or pass globs on the command line:
@@ -311,6 +311,32 @@ Run the container-side daemon inside a devcontainer.
 ### `dbr ensure`
 
 Start the host daemon if it is not already running. Safe to call repeatedly.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--control-port` | 19285 | Control channel port |
+| `--data-port` | 19286 | Data channel port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
+| `--no-auth` | false | Disable auth when spawning a new daemon |
+
+### `dbr stop`
+
+Stop a running host daemon by sending a shutdown message.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--control-port` | 19285 | Control channel port |
+| `--host` | auto-resolved | Host daemon address (IP or hostname) |
+| `--auth-token` | -- | Authentication token |
+| `--auth-token-file` | -- | Path to file containing auth token |
+
+### `dbr restart`
+
+Stop the running host daemon (if any) and start a fresh one. Equivalent to
+`dbr stop` followed by `dbr ensure`. Useful after upgrading `dbr` or when the
+daemon's auth token is out of sync with the token file.
 
 | Flag | Default | Description |
 |------|---------|-------------|

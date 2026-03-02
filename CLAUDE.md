@@ -136,12 +136,12 @@ In `~/.config/dbr/config.toml`:
 ```toml
 [socket_forwarding]
 watch_paths = ["/tmp/*.sock", "/run/user/1000/**/*.sock"]  # Glob patterns for socket discovery
-scan_interval_secs = 5       # How often to scan for new/removed sockets (default: 5)
-max_sockets = 16             # Maximum number of sockets to forward (default: 16)
-container_base_path = "/tmp" # Base directory for mirror sockets in containers
+scan_interval_ms = 5000           # How often to scan in milliseconds (default: 5000)
+max_socket_forwards = 16          # Maximum number of sockets to forward (default: 16)
+container_path_prefix = "/tmp"    # Base directory for mirror sockets in containers
 ```
 
-When `watch_paths` is empty (the default), no Unix sockets are forwarded.
+Setting `watch_paths` to a non-empty list auto-enables socket forwarding. When `watch_paths` is empty (the default), no Unix sockets are forwarded.
 
 ---
 

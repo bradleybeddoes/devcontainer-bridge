@@ -303,6 +303,11 @@ fn apply_file_config(config: &mut Config, file: &FileConfig) -> Result<(), Confi
         }
         if let Some(ref v) = sf.watch_paths {
             config.socket_forwarding.watch_paths.clone_from(v);
+            // Auto-enable when watch_paths is provided and non-empty,
+            // unless explicitly disabled with `enabled = false`.
+            if !v.is_empty() && sf.enabled.is_none() {
+                config.socket_forwarding.enabled = true;
+            }
         }
         if sf.container_path_prefix.is_some() {
             config

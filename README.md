@@ -147,6 +147,8 @@ Host Path                                          Container Path
 dbr host-daemon       Start the host-side daemon (--no-auth, --socket-watch-paths)
 dbr container-daemon  Start the container-side daemon (--auth-token)
 dbr ensure            Start host daemon if not already running (--no-auth)
+dbr stop              Stop a running host daemon (--auth-token)
+dbr restart           Stop + start the host daemon (--no-auth)
 dbr status            Show active port and socket forwards (--auth-token)
 dbr forward PORT      Manually forward a port (--auth-token)
 dbr unforward PORT    Manually remove a port forward (--auth-token)
@@ -200,7 +202,26 @@ dbr ensure [--control-port PORT] [--data-port PORT]
            [--auth-token TOKEN] [--auth-token-file PATH] [--no-auth]
 ```
 
-Starts the host daemon if not already running. If a daemon is already running, verifies it is healthy via Ping/Pong.
+Starts the host daemon if not already running. If a daemon is already running, verifies it is healthy via Ping/Pong. Generates the auth token file before spawning if one doesn't exist.
+
+### Stop
+
+```bash
+dbr stop [--control-port PORT] [--host ADDR]
+         [--auth-token TOKEN] [--auth-token-file PATH]
+```
+
+Sends a shutdown message to a running host daemon. Requires a valid auth token (unless the daemon was started with `--no-auth`).
+
+### Restart
+
+```bash
+dbr restart [--control-port PORT] [--data-port PORT]
+            [--host ADDR]
+            [--auth-token TOKEN] [--auth-token-file PATH] [--no-auth]
+```
+
+Stops the running host daemon (if any) and starts a fresh one. Equivalent to `dbr stop` followed by `dbr ensure`. Useful after upgrading `dbr` or when the daemon's auth token is out of sync.
 
 ### Status
 
@@ -247,9 +268,9 @@ Add watch patterns to `~/.config/dbr/config.toml`:
 ```toml
 [socket_forwarding]
 watch_paths = ["/tmp/*.sock", "/run/user/1000/gnupg/S.gpg-agent"]
-scan_interval_secs = 5
-max_sockets = 16
-container_base_path = "/tmp"
+scan_interval_ms = 5000
+max_socket_forwards = 16
+container_path_prefix = "/tmp"
 ```
 
 Or via CLI flags:
@@ -258,7 +279,7 @@ Or via CLI flags:
 dbr host-daemon --socket-watch-paths "/tmp/*.sock,/run/user/1000/**/*.sock"
 ```
 
-When `watch_paths` is empty (the default), no Unix sockets are forwarded.
+Setting `watch_paths` auto-enables socket forwarding. When `watch_paths` is empty (the default), no sockets are forwarded.
 
 ## Shell Integration
 
