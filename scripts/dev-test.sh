@@ -33,10 +33,6 @@ SCAN_WAIT=3          # seconds to wait for port scan detection
 FORWARD_WAIT=5       # seconds to wait for port forwarding to appear in status
 REGISTER_WAIT=3      # seconds to wait for container registration
 
-# Generate a test auth token
-TEST_AUTH_TOKEN=$(openssl rand -hex 32)
-log_info "Generated test auth token: ${TEST_AUTH_TOKEN:0:8}..."
-
 # ---------------------------------------------------------------------------
 # Color output helpers
 # ---------------------------------------------------------------------------
@@ -58,6 +54,10 @@ log_fail()  { echo -e "${RED}[FAIL]${NC}  $*"; fail_count=$((fail_count + 1)); }
 log_skip()  { echo -e "${YELLOW}[SKIP]${NC}  $*"; skip_count=$((skip_count + 1)); }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_phase() { echo -e "\n${BOLD}=== $* ===${NC}\n"; }
+
+# Generate a test auth token
+TEST_AUTH_TOKEN=$(openssl rand -hex 32)
+log_info "Generated test auth token: ${TEST_AUTH_TOKEN:0:8}..."
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -528,16 +528,19 @@ fi
 
 # Validate dbr status --json output structure
 log_info "Validating 'dbr status --json' output..."
-status_json=$("$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" --json 2>/dev/null || echo "[]")
+status_json=$("$HOST_BINARY" status --auth-token "$TEST_AUTH_TOKEN" --json 2>/dev/null || echo "{}")
 json_valid=$(echo "$status_json" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    if not isinstance(data, list):
-        print('not_array')
+    if not isinstance(data, dict):
+        print('not_object')
         sys.exit(0)
-    for fwd in data:
-        # Verify required fields are present
+    forwards = data.get('forwards', [])
+    if not isinstance(forwards, list):
+        print('forwards_not_array')
+        sys.exit(0)
+    for fwd in forwards:
         required = ['container_id', 'hostname', 'port', 'host_port', 'protocol', 'since']
         missing = [k for k in required if k not in fwd]
         if missing:
@@ -562,7 +565,7 @@ if echo "$status_json" | grep -q "$TEST_PORT"; then
     host_port=$(echo "$status_json" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for fwd in data:
+for fwd in data.get('forwards', []):
     if fwd.get('port') == $TEST_PORT:
         print(fwd.get('host_port', $TEST_PORT))
         break
@@ -809,9 +812,11 @@ fi
 log_phase "Test Phase: Auth Rejection"
 
 # Test: auth failure with wrong token
+# Use 'forward' which requires Register (auth-gated), not 'status' which uses
+# ListRequest (unauthenticated read-only query).
 log_info "Testing auth rejection with wrong token..."
-if "$HOST_BINARY" status --auth-token "wrongtoken$(openssl rand -hex 28)" --control-port "$CONTROL_PORT" 2>/dev/null; then
-    log_fail "status with wrong token should have failed"
+if "$HOST_BINARY" forward 9999 --auth-token "wrongtoken$(openssl rand -hex 28)" --control-port "$CONTROL_PORT" 2>/dev/null; then
+    log_fail "forward with wrong token should have failed"
 else
     log_pass "Auth rejection works correctly"
 fi
