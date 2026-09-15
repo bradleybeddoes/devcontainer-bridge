@@ -395,11 +395,11 @@ async fn tmux_inserts_literal_quoted_path_without_submitting() {
     }
     let binding = "dbr paste --tmux-target \"#{pane_id}\" >/dev/null";
     assert!(server
-        .command(&["bind-key", "P", "run-shell", "-b", binding])
+        .command(&["bind-key", "V", "run-shell", "-b", binding])
         .await
         .status
         .success());
-    let bindings = server.command(&["list-keys", "P"]).await;
+    let bindings = server.command(&["list-keys", "V"]).await;
     assert!(bindings.status.success());
     assert!(String::from_utf8_lossy(&bindings.stdout).contains("#{pane_id}"));
     assert!(server

@@ -62,7 +62,7 @@ Native PNG and JPEG bytes are preserved. Images are limited to **20 MiB**; macOS
 Add this binding to `~/.tmux.conf` **inside the container**:
 
 ```tmux
-bind-key P run-shell -b 'dbr paste --tmux-target "#{pane_id}" >/dev/null'
+bind-key V run-shell -b 'dbr paste --tmux-target "#{pane_id}" >/dev/null'
 ```
 
 Reload the configuration from a container tmux pane:
@@ -71,7 +71,21 @@ Reload the configuration from a container tmux pane:
 tmux source-file ~/.tmux.conf
 ```
 
-Copy an image on the host, focus the destination application, then press your tmux prefix followed by **Shift-P**. The binding captures the destination pane ID when invoked and runs the transfer in the background. Configure token access for the tmux server's environment, or add `--auth-token-file /path/to/token` to the binding.
+Copy an image on the host, focus the destination application, then press your tmux prefix followed by **Shift-V**. The binding captures the destination pane ID when invoked and runs the transfer in the background. Configure token access for the tmux server's environment, or add `--auth-token-file /path/to/token` to the binding.
+
+### Nested tmux and shared dotfiles
+
+With tmux on both the Mac and in the container, the binding belongs in the container. If both use Ctrl-a and the outer session binds Ctrl-a to `send-prefix`, press **Ctrl-a → Ctrl-a → Shift-V**. The doubled prefix passes one Ctrl-a through to the inner session.
+
+If the same tmux configuration is used on the Mac and in Docker containers, guard the binding so the outer tmux does not intercept it:
+
+```tmux
+if-shell '[ -f /.dockerenv ] && dbr paste --help >/dev/null 2>&1' {
+    bind-key V run-shell -b 'dbr paste --tmux-target "#{pane_id}" >/dev/null'
+}
+```
+
+This binds the key only in Docker containers with a clipboard-capable `dbr` installed. It does not change Command-V text paste. Prefix + Shift-V has no default binding in tmux 3.3a; check your own configuration with `tmux list-keys -T prefix V` before adding it.
 
 `--tmux-target` requires an exact pane ID such as `%3` and the inherited `TMUX` environment variable identifying its server. It inserts the saved path literally with shell quoting and does not submit the application's input. The receiving application decides how to use that path; dbr does not create application-specific attachments.
 
