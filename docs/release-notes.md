@@ -1,3 +1,10 @@
+# Unreleased
+
+## Finder image files
+
+- On macOS, `dbr paste` now transfers the contents of a single PNG or JPEG file copied in Finder instead of Finder's rendered file icon.
+- Unsupported, oversized, unreadable, and multiple file selections fail instead of silently transferring an icon.
+
 # v0.4.0
 
 ## Clipboard images

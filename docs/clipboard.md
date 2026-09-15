@@ -94,7 +94,10 @@ Example output:
 /home/user/.cache/dbr/paste/image-a1b2c3/clipboard.png
 ```
 
-The image must be on the clipboard as image data. Copying a file in Finder or a file manager may put only a file reference on the clipboard; open the image and copy its contents instead.
+On macOS, copying one local PNG or JPEG file in Finder transfers that file's
+contents rather than Finder's rendered icon. Selecting multiple files is not
+supported. Other clipboard sources must provide image data; file references from
+Linux file managers are not supported.
 
 Options:
 
@@ -113,6 +116,11 @@ dbr paste --host host.docker.internal --data-port 19286
 | `jpeg` | Require a native JPEG representation. PNG and TIFF are not converted to JPEG. |
 
 Native PNG and JPEG bytes are preserved. Images are limited to **20 MiB**; macOS TIFF conversion also limits dimensions to 40 million pixels. Other binary formats are not supported.
+
+For a single Finder file, the file reference is authoritative: `auto` accepts a
+PNG or JPEG based on its byte signature, while an explicit format requires the
+file to match. An unreadable, oversized, unsupported, or multiply selected file
+returns an error instead of transferring Finder's icon.
 
 ## Paste the path into tmux
 
@@ -156,7 +164,7 @@ Output paths must not contain symlink components, `..`, or control characters. U
 
 **Successful images stay on disk until you remove them.** There is no automatic expiry. Delete the individual image directory when the receiving application no longer needs it. Container storage still follows your container's normal persistence rules.
 
-Enabling clipboard access lets clients with the host token request supported clipboard images. There is no continuous synchronization or per-request host confirmation. Disable access by setting `[clipboard] enabled = false` and restarting the daemon, or use `host-daemon --no-clipboard` for one run.
+Enabling clipboard access lets clients with the host token request supported clipboard images. On macOS, this includes the contents of a single PNG or JPEG file whose reference is currently on the clipboard. File paths are not logged or sent to the container. There is no continuous synchronization or per-request host confirmation. Disable access by setting `[clipboard] enabled = false` and restarting the daemon, or use `host-daemon --no-clipboard` for one run.
 
 Transfers use the bridge's existing TCP transport, which is **not encrypted**. Keep its ports within your trusted host/container network; token authentication does not protect against network eavesdropping.
 
@@ -166,7 +174,7 @@ The CLI opens a dedicated connection to the existing host **data port** (default
 
 - **Sharing disabled:** set `[clipboard] enabled = true` on the host and restart it. `ensure` does not change an existing daemon.
 - **Authentication failed:** supply the same token the host daemon uses. `--no-auth` cannot grant clipboard access.
-- **No requested image:** copy image contents; try `--format auto` if JPEG is unavailable. Confirm the daemon can access your logged-in desktop session.
+- **No requested image:** copy image contents or one PNG/JPEG file in Finder; try `--format auto` if the explicit format does not match. Confirm the daemon can access your logged-in desktop session.
 - **Connection or protocol error after upgrading:** upgrade both binaries and restart the host with clipboard access enabled. Check the host address and data port.
 - **tmux target error:** run from container tmux and use an exact pane ID on the server identified by `TMUX`.
 - **Transfer already in progress:** retry after the current transfer finishes; the host permits one at a time.

@@ -36,10 +36,12 @@ pub enum CaptureError {
 
 /// Read a PNG or JPEG representation from the host's desktop clipboard.
 ///
-/// Automatic selection prefers PNG. Explicit formats require that representation
-/// to be supplied by the clipboard. On macOS, PNG also supports converting a
-/// TIFF-only clipboard image; automatic selection tries native PNG/JPEG first.
-/// No clipboard content or helper diagnostics are logged.
+/// On macOS, a single local file URL takes precedence over rendered clipboard
+/// representations so copying a PNG/JPEG in Finder transfers the file rather
+/// than its icon. Otherwise automatic selection prefers PNG. Explicit formats
+/// require that representation to be supplied by the clipboard. PNG also
+/// supports converting a TIFF-only clipboard image. No clipboard content, file
+/// paths, or helper diagnostics are logged.
 ///
 /// # Errors
 ///
@@ -80,6 +82,14 @@ fn matches_format(bytes: &[u8], format: ClipboardFormat) -> bool {
 
 #[cfg(target_os = "macos")]
 async fn capture_format(format: ClipboardFormat) -> Result<Vec<u8>, CaptureError> {
+    capture_format_from_pasteboard(format, None).await
+}
+
+#[cfg(target_os = "macos")]
+async fn capture_format_from_pasteboard(
+    format: ClipboardFormat,
+    pasteboard_name: Option<&str>,
+) -> Result<Vec<u8>, CaptureError> {
     let native_types = match format {
         ClipboardFormat::Png => "['public.png']",
         ClipboardFormat::Jpeg => "['public.jpeg']",
@@ -90,37 +100,62 @@ async fn capture_format(format: ClipboardFormat) -> Result<Vec<u8>, CaptureError
     // avoids text encodings, legacy AppleScript clipboard classes and temp files.
     let script = format!(
         r#"ObjC.import('AppKit');
-function run() {{
-    const board = $.NSPasteboard.generalPasteboard;
+function run(argv) {{
+    const board = argv.length === 0
+        ? $.NSPasteboard.generalPasteboard
+        : $.NSPasteboard.pasteboardWithName(argv[0]);
+    const changeCount = board.changeCount;
+    const fileOptions = $.NSDictionary.dictionaryWithObjectForKey(
+        $.NSNumber.numberWithBool(true), $.NSPasteboardURLReadingFileURLsOnlyKey);
+    const fileUrls = board.readObjectsForClassesOptions(
+        $.NSArray.arrayWithObject($.NSURL), fileOptions);
     let data = $();
-    const types = {native_types};
-    for (let i = 0; i < types.length; i++) {{
-        data = board.dataForType(types[i]);
-        if (!data.isNil()) break;
-    }}
-    if (data.isNil() && {allow_tiff}) {{
-        const tiff = board.dataForType('public.tiff');
-        if (!tiff.isNil()) {{
-            if (tiff.length > {MAX_IMAGE_BYTES}) throw new Error('Image too large');
-            const bitmap = $.NSBitmapImageRep.imageRepWithData(tiff);
-            if (!bitmap.isNil()) {{
-                if (bitmap.pixelsWide * bitmap.pixelsHigh > 40000000)
-                    throw new Error('Image dimensions too large');
-                data = bitmap.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $({{}}));
+
+    if (!fileUrls.isNil() && fileUrls.count > 0) {{
+        if (fileUrls.count !== 1) throw new Error('Expected one image file');
+        const fileUrl = fileUrls.objectAtIndex(0);
+        if (!fileUrl.isFileURL) throw new Error('Expected a local file');
+        const attributes = $.NSFileManager.defaultManager
+            .attributesOfItemAtPathError(fileUrl.path, null);
+        if (attributes.isNil()
+            || !attributes.objectForKey($.NSFileType)
+                .isEqualToString($.NSFileTypeRegular))
+            throw new Error('Expected a regular file');
+        const handle = $.NSFileHandle.fileHandleForReadingAtPath(fileUrl.path);
+        if (handle.isNil()) throw new Error('Image file is unavailable');
+        data = handle.readDataOfLength({MAX_IMAGE_BYTES_PLUS_ONE});
+        if (board.changeCount !== changeCount) throw new Error('Clipboard changed');
+    }} else {{
+        const types = {native_types};
+        for (let i = 0; i < types.length; i++) {{
+            data = board.dataForType(types[i]);
+            if (!data.isNil()) break;
+        }}
+        if (data.isNil() && {allow_tiff}) {{
+            const tiff = board.dataForType('public.tiff');
+            if (!tiff.isNil()) {{
+                if (tiff.length > {MAX_IMAGE_BYTES}) throw new Error('Image too large');
+                const bitmap = $.NSBitmapImageRep.imageRepWithData(tiff);
+                if (!bitmap.isNil()) {{
+                    if (bitmap.pixelsWide * bitmap.pixelsHigh > 40000000)
+                        throw new Error('Image dimensions too large');
+                    data = bitmap.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $({{}}));
+                }}
             }}
         }}
     }}
     if (data.isNil()) throw new Error('No requested image');
     if (data.length > {MAX_IMAGE_BYTES}) throw new Error('Image too large');
     $.NSFileHandle.fileHandleWithStandardOutput.writeData(data);
-}}"#
+}}"#,
+        MAX_IMAGE_BYTES_PLUS_ONE = MAX_IMAGE_BYTES + 1
     );
-    let bytes = run_helper(
-        Command::new("/usr/bin/osascript").args(["-l", "JavaScript", "-e", &script]),
-        MAX_IMAGE_BYTES,
-        CAPTURE_TIMEOUT,
-    )
-    .await?;
+    let mut command = Command::new("/usr/bin/osascript");
+    command.args(["-l", "JavaScript", "-e", &script]);
+    if let Some(name) = pasteboard_name {
+        command.arg(name);
+    }
+    let bytes = run_helper(&mut command, MAX_IMAGE_BYTES, CAPTURE_TIMEOUT).await?;
     if matches_format(&bytes, format)
         || (matches!(format, ClipboardFormat::Auto)
             && (matches_format(&bytes, ClipboardFormat::Png)
@@ -228,6 +263,8 @@ async fn run_helper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use std::path::Path;
 
     #[test]
     fn signatures_must_match_requested_format() {
@@ -242,6 +279,113 @@ mod tests {
         assert!(!matches_format(b"\x89PNG\r\n\x1a\n", ClipboardFormat::Jpeg));
         assert!(!matches_format(b"plain text", ClipboardFormat::Png));
         assert!(!matches_format(b"", ClipboardFormat::Auto));
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn seed_file_pasteboard(
+        name: &str,
+        sources: &[&Path],
+        rendered_image: &Path,
+    ) -> Result<(), CaptureError> {
+        let script = r#"ObjC.import('AppKit');
+function run(argv) {
+    const board = $.NSPasteboard.pasteboardWithName(argv[0]);
+    const rendered = $.NSData.dataWithContentsOfFile(argv[argv.length - 1]);
+    if (rendered.isNil()) throw new Error('Missing rendered image fixture');
+    const items = $.NSMutableArray.array;
+    for (let i = 1; i < argv.length - 1; i++) {
+        const item = $.NSPasteboardItem.alloc.init;
+        const fileUrl = $.NSURL.fileURLWithPath(argv[i]);
+        item.setStringForType(fileUrl.absoluteString, 'public.file-url');
+        item.setDataForType(rendered, 'public.png');
+        items.addObject(item);
+    }
+    board.clearContents;
+    if (!board.writeObjects(items)) throw new Error('Unable to seed pasteboard');
+}"#;
+        let mut command = Command::new("/usr/bin/osascript");
+        command.args(["-l", "JavaScript", "-e", script, name]);
+        for source in sources {
+            command.arg(source);
+        }
+        command.arg(rendered_image);
+        run_helper(&mut command, 0, CAPTURE_TIMEOUT)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn finder_file_bytes_take_precedence_over_rendered_icon() {
+        let root = tempfile::tempdir().unwrap();
+        let png = root.path().join("actual image.png");
+        let jpeg = root.path().join("actual image.jpg");
+        let unsupported = root.path().join("notes.txt");
+        let icon = root.path().join("finder-icon.png");
+        let png_bytes = b"\x89PNG\r\n\x1a\nactual-png";
+        let jpeg_bytes = b"\xff\xd8\xffactual-jpeg";
+        let icon_bytes = b"\x89PNG\r\n\x1a\nfinder-icon";
+        std::fs::write(&png, png_bytes).unwrap();
+        std::fs::write(&jpeg, jpeg_bytes).unwrap();
+        std::fs::write(&unsupported, b"not an image").unwrap();
+        std::fs::write(&icon, icon_bytes).unwrap();
+
+        for (source, format, expected) in [
+            (&png, ClipboardFormat::Auto, png_bytes.as_slice()),
+            (&png, ClipboardFormat::Png, png_bytes.as_slice()),
+            (&jpeg, ClipboardFormat::Auto, jpeg_bytes.as_slice()),
+            (&jpeg, ClipboardFormat::Jpeg, jpeg_bytes.as_slice()),
+        ] {
+            let name = format!("devcontainer-bridge-tests-{}", uuid::Uuid::new_v4());
+            seed_file_pasteboard(&name, &[source.as_path()], &icon)
+                .await
+                .unwrap();
+            assert_eq!(
+                capture_format_from_pasteboard(format, Some(&name))
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+
+        let name = format!("devcontainer-bridge-tests-{}", uuid::Uuid::new_v4());
+        seed_file_pasteboard(&name, &[unsupported.as_path()], &icon)
+            .await
+            .unwrap();
+        assert!(matches!(
+            capture_format_from_pasteboard(ClipboardFormat::Auto, Some(&name)).await,
+            Err(CaptureError::Unavailable)
+        ));
+
+        let name = format!("devcontainer-bridge-tests-{}", uuid::Uuid::new_v4());
+        seed_file_pasteboard(&name, &[jpeg.as_path()], &icon)
+            .await
+            .unwrap();
+        assert!(matches!(
+            capture_format_from_pasteboard(ClipboardFormat::Png, Some(&name)).await,
+            Err(CaptureError::Unavailable)
+        ));
+
+        let name = format!("devcontainer-bridge-tests-{}", uuid::Uuid::new_v4());
+        seed_file_pasteboard(&name, &[png.as_path(), jpeg.as_path()], &icon)
+            .await
+            .unwrap();
+        assert!(matches!(
+            capture_format_from_pasteboard(ClipboardFormat::Auto, Some(&name)).await,
+            Err(CaptureError::Unavailable)
+        ));
+
+        let oversized = root.path().join("oversized.png");
+        let file = std::fs::File::create(&oversized).unwrap();
+        file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
+        let name = format!("devcontainer-bridge-tests-{}", uuid::Uuid::new_v4());
+        seed_file_pasteboard(&name, &[oversized.as_path()], &icon)
+            .await
+            .unwrap();
+        assert!(matches!(
+            capture_format_from_pasteboard(ClipboardFormat::Auto, Some(&name)).await,
+            Err(CaptureError::Unavailable)
+        ));
     }
 
     #[tokio::test]
