@@ -119,9 +119,11 @@ function run(argv) {{
         }}
     }}
     let data = $();
+    // JXA exposes NSUInteger properties as strings on some macOS versions.
+    const fileUrlCount = Number(fileUrls.count);
 
-    if (fileUrls.count > 0) {{
-        if (fileUrls.count !== 1) throw new Error('Expected one image file');
+    if (fileUrlCount > 0) {{
+        if (fileUrlCount !== 1) throw new Error('Expected one image file');
         const fileUrl = fileUrls.objectAtIndex(0);
         const handle = $.NSFileHandle.fileHandleForReadingAtPath(fileUrl.path);
         if (handle.isNil()) throw new Error('Image file is unavailable');
