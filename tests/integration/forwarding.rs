@@ -1839,18 +1839,14 @@ mod socket_scanner_tests {
             .expect("should receive RelayMessage within timeout")
             .expect("msg_rx should not be closed");
 
-        // Send the SocketConnectRequest on the registered control connection
+        // Send the SocketConnectRequest on the registered control connection.
         conn.send(&relay.msg).await.unwrap();
 
-        // Signal the ack so handle_socket_client opens the data connection
-        // *after* the host has received the SocketConnectRequest.
+        // Signal the local write acknowledgement so handle_socket_client opens
+        // the data connection. The host tolerates either channel arriving first.
         if let Some(ack_tx) = relay.ack_tx {
             let _ = ack_tx.send(());
         }
-
-        // Small delay for the host to process the SocketConnectRequest and
-        // register the pending connection before ConnectReady arrives.
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 7. Send data through the client and verify echo response
         let test_data = b"Mirror socket pipeline test!";

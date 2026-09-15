@@ -34,7 +34,7 @@ use crate::protocol::{ForwardInfo, Message, Protocol};
 use browser::BrowserOpener;
 use listener::{start_listener, ClientConnection, ListenerError};
 use proxy::{
-    bridge_connection, new_pending_connections, register_pending, resolve_pending,
+    bridge_connection, new_pending_connections, register_pending, resolve_pending_with_grace,
     PendingConnections,
 };
 
@@ -1691,7 +1691,7 @@ async fn handle_data_connection(
                 .into_inner()
                 .reunite(write_half)
                 .map_err(|e| ControlError::Io(std::io::Error::other(e.to_string())))?;
-            resolve_pending(
+            resolve_pending_with_grace(
                 &ctx.pending,
                 &conn_id,
                 proxy::DataStream { stream, buffered },

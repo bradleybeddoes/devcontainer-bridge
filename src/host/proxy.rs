@@ -19,6 +19,11 @@ use tracing::{debug, info, warn};
 /// Timeout for waiting for a [`ConnectReady`] after sending [`ConnectRequest`].
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Grace period for a data connection that wins the race with its control
+/// request on the independent TCP channel.
+const EARLY_DATA_GRACE_PERIOD: Duration = Duration::from_secs(1);
+const EARLY_DATA_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
 /// Errors that can occur during proxying.
 #[derive(Debug, Error)]
 pub enum ProxyError {
@@ -135,6 +140,38 @@ pub async fn resolve_pending(
             warn!(conn_id, "no pending connection found (timed out or stale)");
             false
         }
+    }
+}
+
+/// Resolve a data connection, allowing its control request a brief window to
+/// register first when the independent data channel arrives out of order.
+pub(super) async fn resolve_pending_with_grace(
+    pending: &PendingConnections,
+    conn_id: &str,
+    data: DataStream,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + EARLY_DATA_GRACE_PERIOD;
+
+    loop {
+        if let Some(tx) = pending.lock().await.remove(conn_id) {
+            return if tx.send(data).is_ok() {
+                debug!(conn_id, "resolved pending connection");
+                true
+            } else {
+                warn!(
+                    conn_id,
+                    "pending receiver dropped before data stream delivered"
+                );
+                false
+            };
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            warn!(conn_id, "no pending connection found (timed out or stale)");
+            return false;
+        }
+
+        tokio::time::sleep(EARLY_DATA_RETRY_INTERVAL).await;
     }
 }
 
@@ -264,6 +301,30 @@ mod tests {
             buffered: Vec::new(),
         };
         assert!(!resolve_pending(&pending, "unknown", data).await);
+    }
+
+    #[tokio::test]
+    async fn early_data_waits_for_pending_registration() {
+        let pending = new_pending_connections();
+        let conn_id = "early-data".to_string();
+        let (stream, _peer) = tcp_pair().await;
+        let data = DataStream {
+            stream,
+            buffered: Vec::new(),
+        };
+
+        let resolve = resolve_pending_with_grace(&pending, &conn_id, data);
+        tokio::pin!(resolve);
+
+        tokio::select! {
+            biased;
+            result = &mut resolve => panic!("resolved before registration: {result}"),
+            () = tokio::task::yield_now() => {}
+        }
+
+        let rx = register_pending(&pending, conn_id.clone()).await.unwrap();
+        assert!(resolve.await);
+        let _data_stream = rx.await.unwrap();
     }
 
     #[tokio::test]

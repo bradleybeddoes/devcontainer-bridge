@@ -7,6 +7,7 @@ Notable changes to `devcontainer-bridge` are documented here.
 ### Fixed
 
 - On macOS, `dbr paste` now reads the contents of one local PNG or JPEG file copied in Finder instead of capturing Finder's rendered file icon. Unreadable, oversized, unsupported, and multiple file selections fail rather than falling back to the icon.
+- Reverse Unix-socket connections are no longer dropped when the data-channel handshake arrives just before its control-channel request is registered.
 
 ## [0.4.0] - 2026-09-15
 
