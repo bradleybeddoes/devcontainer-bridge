@@ -5,6 +5,8 @@
 //! host-side daemons, a JSON-line control protocol, and supporting utilities.
 
 pub mod auth;
+pub mod clipboard_capture;
+pub mod clipboard_client;
 pub mod config;
 pub mod container;
 pub mod control;

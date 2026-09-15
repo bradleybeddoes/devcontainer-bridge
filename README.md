@@ -1,6 +1,6 @@
 # Development Container Bridge (`dbr`)
 
-Automatic port forwarding, Unix socket bridging, and browser URL opening between devcontainers and the host machine for CLI users.
+Automatic port forwarding, Unix socket bridging, browser URL opening, and opt-in clipboard image transfer between devcontainers and the host machine for CLI users.
 
 ## The Problem
 
@@ -141,10 +141,16 @@ Host Path                                          Container Path
 /run/user/1000/gnupg/S.gpg-agent                   /tmp/gnupg/S.gpg-agent
 ```
 
+## Clipboard Images
+
+Save a host clipboard PNG or JPEG inside the container with `dbr paste`. Enable access on the host with `dbr host-daemon --allow-clipboard` and provide the same authentication token in the container. Stop any existing host daemon with `dbr stop` before enabling access.
+
+The command prints the saved image path; `--tmux-target` can insert it into a specific container tmux pane without submitting input. Files remain until you remove them. See the [clipboard guide](docs/clipboard.md) for setup, PNG/JPEG behavior, a tmux shortcut, and privacy details.
+
 ## CLI Usage
 
 ```
-dbr host-daemon       Start the host-side daemon (--no-auth, --socket-watch-paths)
+dbr host-daemon       Start the host-side daemon (--no-auth, --socket-watch-paths, --allow-clipboard)
 dbr container-daemon  Start the container-side daemon (--auth-token)
 dbr ensure            Start host daemon if not already running (--no-auth)
 dbr stop              Stop a running host daemon (--auth-token)
@@ -153,6 +159,7 @@ dbr status            Show active port and socket forwards (--auth-token)
 dbr forward PORT      Manually forward a port (--auth-token)
 dbr unforward PORT    Manually remove a port forward (--auth-token)
 dbr open URL          Open a URL in the host browser (--auth-token)
+dbr paste             Save a host clipboard PNG/JPEG (--format, --tmux-target)
 ```
 
 ### Host Daemon
@@ -160,7 +167,7 @@ dbr open URL          Open a URL in the host browser (--auth-token)
 ```bash
 dbr host-daemon [--bind-addr ADDR] [--no-docker-detect]
                 [--control-port PORT] [--data-port PORT]
-                [--browser-cmd COMMAND]
+                [--browser-cmd COMMAND] [--allow-clipboard]
                 [--auth-token TOKEN] [--auth-token-file PATH] [--no-auth]
                 [--socket-watch-paths GLOBS]
                 [--socket-container-path-prefix PATH]
@@ -349,6 +356,7 @@ On Apple Silicon macOS, `cross` does not work reliably for `aarch64-unknown-linu
 
 ## Documentation
 
+- [Clipboard Images](docs/clipboard.md) — save host images and paste their paths into container tmux
 - [Architecture & Protocol](docs/architecture.md) — reverse connection model, protocol spec, data flow
 - [Security Model](docs/security.md) — threat model, security guarantees, audit guidance
 - [CLI Developer Guide](docs/cli-guide.md) — terminal workflow setup, troubleshooting
@@ -359,3 +367,5 @@ On Apple Silicon macOS, `cross` does not work reliably for `aarch64-unknown-linu
 ## License
 
 See [LICENSE](LICENSE) for details.
+
+Clipboard additions written by Codex; exact model unavailable.

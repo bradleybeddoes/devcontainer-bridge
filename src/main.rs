@@ -91,6 +91,7 @@ fn main() -> ExitCode {
             auth_token,
             auth_token_file,
             no_auth,
+            allow_clipboard,
             socket_watch_paths,
             socket_container_path_prefix,
             socket_scan_interval_ms,
@@ -163,6 +164,7 @@ fn main() -> ExitCode {
                 exit_on_idle,
                 browser_cmd,
                 auth_token: resolved_auth_token,
+                allow_clipboard,
                 socket_forwarding,
                 ..HostConfig::default()
             };
@@ -178,6 +180,63 @@ fn main() -> ExitCode {
             }
 
             ExitCode::SUCCESS
+        }
+
+        Command::Paste {
+            format,
+            host,
+            data_port,
+            output_dir,
+            tmux_target,
+            auth_token,
+            auth_token_file,
+        } => {
+            init_tracing("warn", "text", None);
+            run_async(async {
+                let mut config = Config::from_env().map_err(|e| e.to_string())?;
+                if let Some(host) = host {
+                    config.host_addr = Some(host);
+                }
+                let container_token_path =
+                    std::path::Path::new(dbr::auth::DEFAULT_CONTAINER_TOKEN_PATH);
+                let resolved = dbr::auth::resolve_token(
+                    auth_token.as_deref(),
+                    auth_token_file.as_deref().map(std::path::Path::new),
+                    container_token_path,
+                );
+                let token = match resolved {
+                    Err(dbr::auth::AuthError::NoTokenSource { .. }) => {
+                        let default_path =
+                            dbr::auth::token_file_path().map_err(|e| e.to_string())?;
+                        dbr::auth::resolve_token(None, None, &default_path)
+                    }
+                    other => other,
+                }
+                .map_err(|e| e.to_string())?;
+                let host = dbr::container::resolve_host_addr(&config)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let ip = host.parse::<IpAddr>().map_err(|e| e.to_string())?;
+                let addr = SocketAddr::new(ip, data_port.unwrap_or(config.data_port));
+                let output_dir = match output_dir {
+                    Some(path) => path,
+                    None => std::path::PathBuf::from(
+                        std::env::var_os("HOME").ok_or("HOME is not set; use --output-dir")?,
+                    )
+                    .join(".cache/dbr/paste"),
+                };
+                let path = dbr::clipboard_client::paste(
+                    addr,
+                    &token,
+                    format,
+                    &output_dir,
+                    tmux_target.as_deref(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                println!("{}", path.display());
+                Ok::<(), String>(())
+            })
         }
 
         Command::ContainerDaemon {

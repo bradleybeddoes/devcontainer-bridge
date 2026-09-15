@@ -7,6 +7,7 @@
 //!   TCP proxying.
 
 pub mod browser;
+mod clipboard;
 pub mod ensure;
 pub mod listener;
 pub mod proxy;
@@ -110,6 +111,9 @@ enum ForwardError {
 /// Errors that can occur in the host daemon.
 #[derive(Debug, Error)]
 pub enum HostError {
+    /// Clipboard sharing cannot be enabled without a nonempty authentication token.
+    #[error("clipboard sharing requires authentication; remove --no-auth and configure a token")]
+    ClipboardRequiresAuth,
     /// Failed to bind the control or data listener.
     #[error("failed to bind {role} on port {port}: {source}")]
     Bind {
@@ -390,6 +394,8 @@ struct DaemonContext {
     /// `auth_token` field. When `None`, authentication is disabled
     /// (no-auth mode) and any token value is accepted.
     auth_token: Option<String>,
+    /// Opt-in clipboard reader with a single concurrent transfer.
+    clipboard: clipboard::ClipboardService,
 }
 
 /// Configuration for the host daemon.
@@ -425,6 +431,8 @@ pub struct HostConfig {
     /// When `Some(token)`, every `Register` message must carry a matching
     /// `auth_token` field. When `None`, authentication is disabled (no-auth mode).
     pub auth_token: Option<String>,
+    /// Allow authenticated reads of PNG/JPEG images from the host clipboard.
+    pub allow_clipboard: bool,
     /// Socket forwarding configuration.
     pub socket_forwarding: SocketForwardingConfig,
 }
@@ -440,6 +448,7 @@ impl Default for HostConfig {
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             browser_cmd: None,
             auth_token: None,
+            allow_clipboard: false,
             socket_forwarding: SocketForwardingConfig::default(),
         }
     }
@@ -522,6 +531,14 @@ fn timestamp_now() -> String {
 ///
 /// Returns [`HostError`] if the daemon cannot start (e.g. port bind failure).
 pub async fn run(config: HostConfig) -> Result<(), HostError> {
+    if config.allow_clipboard
+        && !config
+            .auth_token
+            .as_ref()
+            .is_some_and(|token| !token.is_empty())
+    {
+        return Err(HostError::ClipboardRequiresAuth);
+    }
     let bind_addr = resolve_bind_addr(&config).await;
 
     let control_listener = ControlListener::bind(bind_addr, config.control_port)
@@ -565,6 +582,10 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
         ))),
         client_tx,
         auth_token: config.auth_token.clone(),
+        clipboard: clipboard::ClipboardService::new(
+            config.allow_clipboard,
+            config.auth_token.clone(),
+        ),
     });
     let drain_timeout = config.drain_timeout;
 
@@ -642,9 +663,9 @@ pub async fn run(config: HostConfig) -> Result<(), HostError> {
                 match result {
                     Ok((stream, addr)) => {
                         debug!(%addr, "accepted data connection");
-                        let pending = Arc::clone(&ctx.pending);
+                        let ctx = Arc::clone(&ctx);
                         tokio::spawn(async move {
-                            if let Err(e) = handle_data_connection(stream, addr, pending).await {
+                            if let Err(e) = handle_data_connection(stream, addr, &ctx).await {
                                 warn!(%addr, error = %e, "data connection error");
                             }
                         });
@@ -1618,13 +1639,13 @@ async fn run_socket_scanner(
     }
 }
 
-/// Handle a data connection: read the ConnectReady handshake and dispatch.
+/// Handle a reverse proxy handshake or an authenticated one-shot clipboard read.
 async fn handle_data_connection(
     stream: tokio::net::TcpStream,
     addr: SocketAddr,
-    pending: PendingConnections,
+    ctx: &DaemonContext,
 ) -> Result<(), ControlError> {
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
     // SECURITY: Use bounded read_message instead of unbounded read_line to
@@ -1640,6 +1661,17 @@ async fn handle_data_connection(
         })??;
 
     match msg {
+        Message::ClipboardRead { format, auth_token } => tokio::time::timeout(
+            Duration::from_secs(30),
+            ctx.clipboard.serve(&mut write_half, format, auth_token),
+        )
+        .await
+        .map_err(|_| {
+            ControlError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "clipboard transfer timed out",
+            ))
+        })?,
         Message::ConnectReady { conn_id } => {
             if conn_id.len() > MAX_CONN_ID_LENGTH {
                 warn!(%addr, "rejecting data connection with oversized conn_id");
@@ -1659,7 +1691,12 @@ async fn handle_data_connection(
                 .into_inner()
                 .reunite(write_half)
                 .map_err(|e| ControlError::Io(std::io::Error::other(e.to_string())))?;
-            resolve_pending(&pending, &conn_id, proxy::DataStream { stream, buffered }).await;
+            resolve_pending(
+                &ctx.pending,
+                &conn_id,
+                proxy::DataStream { stream, buffered },
+            )
+            .await;
             Ok(())
         }
         other => {

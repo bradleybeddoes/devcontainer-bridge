@@ -96,6 +96,10 @@ pub enum Command {
         #[arg(long)]
         no_auth: bool,
 
+        /// Allow authenticated PNG/JPEG reads from the host clipboard.
+        #[arg(long, conflicts_with = "no_auth")]
+        allow_clipboard: bool,
+
         /// Glob patterns for host Unix sockets to forward into containers.
         #[arg(long, value_delimiter = ',')]
         socket_watch_paths: Vec<String>,
@@ -111,6 +115,40 @@ pub enum Command {
         /// Disable socket forwarding explicitly.
         #[arg(long)]
         no_socket_forwarding: bool,
+    },
+
+    /// Save a host clipboard image locally, optionally pasting its path into tmux.
+    ///
+    /// Requires host-daemon --allow-clipboard and a valid authentication token.
+    /// Prints the absolute saved path. Never submits input or sends image bytes to tmux.
+    Paste {
+        /// Image representation to request (auto prefers PNG, then JPEG).
+        #[arg(long, value_enum, default_value = "auto")]
+        format: dbr::protocol::ClipboardFormat,
+
+        /// Host address (otherwise uses container host discovery).
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Host data port (otherwise uses configuration or 19286).
+        #[arg(long)]
+        data_port: Option<u16>,
+
+        /// Local image directory (default: ~/.cache/dbr/paste).
+        #[arg(long)]
+        output_dir: Option<std::path::PathBuf>,
+
+        /// Insert the saved path into this tmux pane, e.g. '%3'.
+        #[arg(long)]
+        tmux_target: Option<String>,
+
+        /// Host authentication token.
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// File containing the host authentication token.
+        #[arg(long)]
+        auth_token_file: Option<String>,
     },
 
     /// Run the container-side daemon (inside a devcontainer).

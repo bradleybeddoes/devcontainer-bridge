@@ -6,6 +6,29 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Image representation requested from the host clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardFormat {
+    /// Prefer PNG, falling back to JPEG when PNG is unavailable.
+    Auto,
+    /// PNG image data.
+    Png,
+    /// JPEG image data.
+    Jpeg,
+}
+
+/// Clipboard credential whose debug representation never exposes the token.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ClipboardToken(pub String);
+
+impl std::fmt::Debug for ClipboardToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
 /// Errors that can occur during protocol message handling.
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -143,6 +166,27 @@ pub struct SocketForwardInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum Message {
+    /// One-shot authenticated clipboard request on the data port.
+    ClipboardRead {
+        /// Desired image representation.
+        format: ClipboardFormat,
+        /// Host authentication token; clipboard reads require authentication.
+        auth_token: ClipboardToken,
+    },
+
+    /// Clipboard response header followed immediately by exactly `size` raw bytes.
+    ClipboardReady {
+        /// Actual representation; never `auto`.
+        format: ClipboardFormat,
+        /// Length of the image in bytes.
+        size: u64,
+    },
+
+    /// Clipboard request failed; no image bytes follow.
+    ClipboardError {
+        /// Human-readable reason, without clipboard contents or credentials.
+        error: String,
+    },
     /// Container registers itself with the host daemon.
     Register {
         /// Unique identifier for the container.
@@ -315,6 +359,32 @@ pub fn deserialize_message(s: &str) -> Result<Message, ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_messages_roundtrip_without_debug_token_disclosure() {
+        let messages = [
+            Message::ClipboardRead {
+                format: ClipboardFormat::Auto,
+                auth_token: ClipboardToken("secret-token".into()),
+            },
+            Message::ClipboardReady {
+                format: ClipboardFormat::Png,
+                size: 100_000,
+            },
+            Message::ClipboardReady {
+                format: ClipboardFormat::Jpeg,
+                size: 200_000,
+            },
+            Message::ClipboardError {
+                error: "clipboard sharing is disabled".into(),
+            },
+        ];
+        for message in messages {
+            assert!(!format!("{message:?}").contains("secret-token"));
+            let encoded = serialize_message(&message).unwrap();
+            assert_eq!(deserialize_message(&encoded).unwrap(), message);
+        }
+    }
 
     #[test]
     fn roundtrip_register() {
