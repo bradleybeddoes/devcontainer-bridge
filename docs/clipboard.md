@@ -4,7 +4,7 @@
 
 ## Enable on the host
 
-Clipboard support and persistent configuration are available in **v0.4.0**. Install that version on the host and in the container using the instructions below, then create the host configuration directory if needed with `mkdir -p ~/.config/dbr`. In `~/.config/dbr/config.toml` **on the host**, add or update this section without replacing your other settings:
+Clipboard support and persistent configuration are available since **v0.4.0**. Install **v0.4.1** or later on the host and in the container using the instructions below, then create the host configuration directory if needed with `mkdir -p ~/.config/dbr`. In `~/.config/dbr/config.toml` **on the host**, add or update this section without replacing your other settings:
 
 ```toml
 [clipboard]
@@ -36,7 +36,7 @@ If an older daemon is running, stop it with its existing `dbr stop` command befo
 Install the pinned release:
 
 ```sh
-curl -fsSL https://github.com/bradleybeddoes/devcontainer-bridge/releases/download/v0.4.0/install.sh | DBR_VERSION=v0.4.0 bash
+curl -fsSL https://github.com/bradleybeddoes/devcontainer-bridge/releases/download/v0.4.1/install.sh | DBR_VERSION=v0.4.1 bash
 /usr/local/bin/dbr --version
 /usr/local/bin/dbr paste --help
 ```
@@ -59,7 +59,7 @@ Pin the released binary in your existing feature configuration. Merge these fiel
 {
   "features": {
     "ghcr.io/bradleybeddoes/devcontainer-bridge/dbr:0": {
-      "version": "v0.4.0"
+      "version": "v0.4.1"
     }
   },
   "initializeCommand": ["/usr/local/bin/dbr", "ensure"]

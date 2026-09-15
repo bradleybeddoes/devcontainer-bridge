@@ -145,7 +145,7 @@ Host Path                                          Container Path
 
 Save a host clipboard PNG or JPEG inside the container with `dbr paste`. Enable access persistently with `[clipboard] enabled = true` in the host’s `~/.config/dbr/config.toml`, then run `dbr restart`. Provide the same authentication token in the container. `host-daemon --allow-clipboard` also enables access for one run; `--no-clipboard` disables it for one run.
 
-The command prints the saved image path; `--tmux-target` can insert it into a specific container tmux pane without submitting input. Files remain until you remove them. Available in **v0.4.0**. See the [clipboard guide](docs/clipboard.md) for pinned release installation that survives Mac restarts and container rebuilds, PNG/JPEG behavior, a tmux shortcut, and privacy details.
+The command prints the saved image path; `--tmux-target` can insert it into a specific container tmux pane without submitting input. Files remain until you remove them. Clipboard image transfer was added in **v0.4.0**; copying PNG/JPEG files directly from macOS Finder is supported in **v0.4.1**. See the [clipboard guide](docs/clipboard.md) for pinned release installation that survives Mac restarts and container rebuilds, PNG/JPEG behavior, a tmux shortcut, and privacy details.
 
 ## CLI Usage
 
@@ -356,6 +356,7 @@ On Apple Silicon macOS, `cross` does not work reliably for `aarch64-unknown-linu
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md) — notable changes by release
 - [Clipboard Images](docs/clipboard.md) — save host images and paste their paths into container tmux
 - [Architecture & Protocol](docs/architecture.md) — reverse connection model, protocol spec, data flow
 - [Security Model](docs/security.md) — threat model, security guarantees, audit guidance
