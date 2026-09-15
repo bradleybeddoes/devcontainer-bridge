@@ -105,22 +105,24 @@ function run(argv) {{
         ? $.NSPasteboard.generalPasteboard
         : $.NSPasteboard.pasteboardWithName(argv[0]);
     const changeCount = board.changeCount;
-    const fileOptions = $.NSDictionary.dictionaryWithObjectForKey(
-        $.NSNumber.numberWithBool(true), $.NSPasteboardURLReadingFileURLsOnlyKey);
-    const fileUrls = board.readObjectsForClassesOptions(
-        $.NSArray.arrayWithObject($.NSURL), fileOptions);
+    const fileUrls = $.NSMutableArray.array;
+    const items = board.pasteboardItems;
+    if (!items.isNil()) {{
+        for (let i = 0; i < items.count; i++) {{
+            const value = items.objectAtIndex(i).stringForType('public.file-url');
+            if (!value.isNil()) {{
+                const fileUrl = $.NSURL.URLWithString(value);
+                if (fileUrl.isNil() || !fileUrl.isFileURL)
+                    throw new Error('Expected a local file');
+                fileUrls.addObject(fileUrl);
+            }}
+        }}
+    }}
     let data = $();
 
-    if (!fileUrls.isNil() && fileUrls.count > 0) {{
+    if (fileUrls.count > 0) {{
         if (fileUrls.count !== 1) throw new Error('Expected one image file');
         const fileUrl = fileUrls.objectAtIndex(0);
-        if (!fileUrl.isFileURL) throw new Error('Expected a local file');
-        const attributes = $.NSFileManager.defaultManager
-            .attributesOfItemAtPathError(fileUrl.path, null);
-        if (attributes.isNil()
-            || !attributes.objectForKey($.NSFileType)
-                .isEqualToString($.NSFileTypeRegular))
-            throw new Error('Expected a regular file');
         const handle = $.NSFileHandle.fileHandleForReadingAtPath(fileUrl.path);
         if (handle.isNil()) throw new Error('Image file is unavailable');
         data = handle.readDataOfLength({MAX_IMAGE_BYTES_PLUS_ONE});
