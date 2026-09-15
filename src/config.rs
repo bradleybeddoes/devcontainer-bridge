@@ -103,6 +103,13 @@ struct FileSocketForwardingConfig {
     max_socket_forwards: Option<usize>,
 }
 
+/// Persistent host clipboard opt-in. Missing settings keep access disabled.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileClipboardConfig {
+    enabled: bool,
+}
+
 /// TOML config file structure at `~/.config/dbr/config.toml`.
 ///
 /// All fields are optional; missing fields retain their default values.
@@ -131,6 +138,8 @@ struct FileConfig {
     no_auth: Option<bool>,
     /// Socket forwarding configuration.
     socket_forwarding: Option<FileSocketForwardingConfig>,
+    /// Host clipboard sharing configuration.
+    clipboard: Option<FileClipboardConfig>,
 }
 
 /// Runtime configuration for both host and container daemons.
@@ -159,6 +168,8 @@ pub struct Config {
     pub no_auth: bool,
     /// Socket forwarding configuration.
     pub socket_forwarding: SocketForwardingConfig,
+    /// Allow authenticated host clipboard image reads (default: false).
+    pub clipboard_enabled: bool,
 }
 
 impl Default for Config {
@@ -175,6 +186,7 @@ impl Default for Config {
             include_ports: Vec::new(),
             no_auth: false,
             socket_forwarding: SocketForwardingConfig::default(),
+            clipboard_enabled: false,
         }
     }
 }
@@ -255,6 +267,9 @@ impl Config {
 
 /// Apply values from a parsed config file onto a [`Config`].
 fn apply_file_config(config: &mut Config, file: &FileConfig) -> Result<(), ConfigError> {
+    if let Some(clipboard) = &file.clipboard {
+        config.clipboard_enabled = clipboard.enabled;
+    }
     if let Some(v) = file.control_port {
         if v == 0 {
             return Err(ConfigError::InvalidPort {
@@ -348,6 +363,45 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn clipboard_configuration_requires_explicit_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (contents, enabled) in [
+            ("", false),
+            ("[clipboard]", false),
+            ("[clipboard]\nenabled = false", false),
+            ("[clipboard]\nenabled = true", true),
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            let config = Config::load(Some(path.clone()), make_lookup(&[])).unwrap();
+            assert_eq!(config.clipboard_enabled, enabled, "{contents}");
+        }
+        assert!(!Config::default().clipboard_enabled);
+    }
+
+    #[test]
+    fn clipboard_configuration_rejects_typos_and_invalid_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for contents in [
+            "[clipboard]\nenabeld = true",
+            "[clipbord]\nenabled = true",
+            "[clipboard]\nenabled = \"true\"",
+            "[clipboard]\nenabled = 1",
+            "clipboard = true",
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(
+                matches!(
+                    Config::load(Some(path.clone()), make_lookup(&[])),
+                    Err(ConfigError::ConfigFile(_))
+                ),
+                "{contents}"
+            );
+        }
     }
 
     #[test]

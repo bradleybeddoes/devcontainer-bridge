@@ -19,6 +19,7 @@ struct Daemon {
     child: Child,
     root: tempfile::TempDir,
     data_port: u16,
+    control_port: u16,
 }
 
 impl Drop for Daemon {
@@ -30,7 +31,21 @@ impl Drop for Daemon {
 
 impl Daemon {
     async fn start(enabled: bool, no_auth: bool, png: Option<&[u8]>, jpeg: Option<&[u8]>) -> Self {
+        Self::start_with_config(enabled, no_auth, png, jpeg, None, false).await
+    }
+
+    async fn start_with_config(
+        enabled: bool,
+        no_auth: bool,
+        png: Option<&[u8]>,
+        jpeg: Option<&[u8]>,
+        configured: Option<bool>,
+        disabled: bool,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
+        if let Some(enabled) = configured {
+            write_clipboard_config(root.path(), enabled);
+        }
         for (extension, bytes) in [("png", png), ("jpeg", jpeg)] {
             if let Some(bytes) = bytes {
                 fs::write(root.path().join(extension), bytes).unwrap();
@@ -73,6 +88,8 @@ exit 1
                 TOKEN,
                 "--no-socket-forwarding",
             ])
+            .env_remove("DCBRIDGE_AUTH_TOKEN")
+            .env_remove("DCBRIDGE_AUTH_TOKEN_FILE")
             .env("PATH", root.path())
             .env("HOME", root.path())
             .env("DBR_FIXTURES", root.path())
@@ -86,6 +103,9 @@ exit 1
         if no_auth {
             command.arg("--no-auth");
         }
+        if disabled {
+            command.arg("--no-clipboard");
+        }
         drop(control_listener);
         drop(data_listener);
         let child = command.spawn().unwrap();
@@ -93,6 +113,7 @@ exit 1
             child,
             root,
             data_port,
+            control_port,
         };
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -158,6 +179,9 @@ exit 1
 }
 
 async fn run(command: &mut tokio::process::Command) -> Output {
+    command
+        .env_remove("DCBRIDGE_AUTH_TOKEN")
+        .env_remove("DCBRIDGE_AUTH_TOKEN_FILE");
     tokio::time::timeout(Duration::from_secs(10), command.output())
         .await
         .expect("CLI timed out")
@@ -282,6 +306,130 @@ async fn explicit_missing_token_file_does_not_fall_back_to_home_token() {
     assert!(!output.status.success());
     assert!(daemon.calls().is_empty());
     assert!(!daemon.output_dir().exists());
+}
+
+fn write_clipboard_config(home: &Path, enabled: bool) {
+    let directory = home.join(".config/dbr");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join("config.toml"),
+        format!("[clipboard]\nenabled = {enabled}\n"),
+    )
+    .unwrap();
+}
+
+// ensure/restart intentionally detach the daemon, so cleanup uses the authenticated
+// shutdown command against this test's own port, even when an assertion unwinds.
+struct DetachedDaemon<'a>(&'a Daemon);
+
+impl Drop for DetachedDaemon<'_> {
+    fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_dbr"))
+            .args([
+                "stop",
+                "--host",
+                "127.0.0.1",
+                "--control-port",
+                &self.0.control_port.to_string(),
+                "--auth-token",
+                TOKEN,
+            ])
+            .env("HOME", self.0.root.path())
+            .env_remove("DCBRIDGE_AUTH_TOKEN")
+            .env_remove("DCBRIDGE_AUTH_TOKEN_FILE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[tokio::test]
+async fn clipboard_config_survives_ensure_and_restart() {
+    let png = b"\x89PNG\r\n\x1a\nconfigured image";
+    let mut daemon = Daemon::start(false, false, Some(png), None).await;
+    daemon.child.kill().unwrap();
+    daemon.child.wait().unwrap();
+    write_clipboard_config(daemon.root.path(), true);
+    let cleanup = DetachedDaemon(&daemon);
+    let pid_file = daemon.root.path().join(".config/dbr/daemon.pid");
+    let mut previous_pid = None;
+    for action in ["ensure", "restart"] {
+        let output = run(tokio::process::Command::new(env!("CARGO_BIN_EXE_dbr"))
+            .args([
+                action,
+                "--host",
+                "127.0.0.1",
+                "--control-port",
+                &daemon.control_port.to_string(),
+                "--data-port",
+                &daemon.data_port.to_string(),
+                "--auth-token",
+                TOKEN,
+            ])
+            .env("HOME", daemon.root.path())
+            .env("PATH", daemon.root.path())
+            .env("DBR_FIXTURES", daemon.root.path())
+            .kill_on_drop(true))
+        .await;
+        assert!(
+            output.status.success(),
+            "{action} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let pid = fs::read_to_string(&pid_file).unwrap();
+        assert_ne!(
+            previous_pid.as_ref(),
+            Some(&pid),
+            "restart retained the original daemon"
+        );
+        previous_pid = Some(pid);
+        let image = saved_path(daemon.paste(TOKEN, "png").await);
+        assert_eq!(fs::read(image).unwrap(), png);
+    }
+    drop(cleanup);
+    assert!(TcpStream::connect(("127.0.0.1", daemon.control_port))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn clipboard_cli_policy_overrides_configuration() {
+    let png = b"\x89PNG\r\n\x1a\nconfigured image";
+    let enabled = Daemon::start_with_config(true, false, Some(png), None, Some(false), false).await;
+    assert_eq!(
+        fs::read(saved_path(enabled.paste(TOKEN, "png").await)).unwrap(),
+        png
+    );
+    let disabled = Daemon::start_with_config(false, false, Some(png), None, Some(true), true).await;
+    assert!(!disabled.paste(TOKEN, "png").await.status.success());
+    assert!(disabled.calls().is_empty());
+    assert!(!disabled.output_dir().exists());
+}
+
+#[tokio::test]
+async fn clipboard_enabled_in_config_rejects_no_auth() {
+    let daemon = Daemon::start(false, false, Some(b"\x89PNG\r\n\x1a\nimage"), None).await;
+    write_clipboard_config(daemon.root.path(), true);
+    let output = run(tokio::process::Command::new(env!("CARGO_BIN_EXE_dbr"))
+        .args([
+            "host-daemon",
+            "--no-auth",
+            "--bind-addr",
+            "127.0.0.1",
+            "--control-port",
+            "0",
+            "--data-port",
+            "0",
+        ])
+        .env("HOME", daemon.root.path())
+        .env("PATH", daemon.root.path())
+        .env("DBR_FIXTURES", daemon.root.path())
+        .kill_on_drop(true))
+    .await;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("clipboard sharing requires authentication"));
+    assert!(daemon.calls().is_empty());
 }
 
 struct TmuxServer(PathBuf);

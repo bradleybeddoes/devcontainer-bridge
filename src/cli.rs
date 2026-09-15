@@ -96,9 +96,13 @@ pub enum Command {
         #[arg(long)]
         no_auth: bool,
 
-        /// Allow authenticated PNG/JPEG reads from the host clipboard.
-        #[arg(long, conflicts_with = "no_auth")]
+        /// Allow authenticated PNG/JPEG reads from the host clipboard (overrides config).
+        #[arg(long, conflicts_with_all = ["no_auth", "no_clipboard"])]
         allow_clipboard: bool,
+
+        /// Disable host clipboard sharing, overriding the config file.
+        #[arg(long)]
+        no_clipboard: bool,
 
         /// Glob patterns for host Unix sockets to forward into containers.
         #[arg(long, value_delimiter = ',')]
@@ -392,4 +396,23 @@ BROWSER INTEGRATION:
         #[arg(long)]
         no_auth: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_flags_require_a_single_authenticated_policy() {
+        for args in [
+            vec!["dbr", "host-daemon", "--allow-clipboard", "--no-clipboard"],
+            vec!["dbr", "host-daemon", "--allow-clipboard", "--no-auth"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap_err().kind(),
+                clap::error::ErrorKind::ArgumentConflict
+            );
+        }
+        assert!(Cli::try_parse_from(["dbr", "host-daemon", "--no-clipboard", "--no-auth"]).is_ok());
+    }
 }

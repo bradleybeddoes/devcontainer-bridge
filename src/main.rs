@@ -92,12 +92,23 @@ fn main() -> ExitCode {
             auth_token_file,
             no_auth,
             allow_clipboard,
+            no_clipboard,
             socket_watch_paths,
             socket_container_path_prefix,
             socket_scan_interval_ms,
             no_socket_forwarding,
         } => {
             init_tracing(&log_level, &log_format, log_file.as_deref());
+
+            let loaded_config = match Config::from_env() {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("config error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let allow_clipboard =
+                !no_clipboard && (allow_clipboard || loaded_config.clipboard_enabled);
 
             let resolved_auth_token = if no_auth {
                 eprintln!(
@@ -135,7 +146,6 @@ fn main() -> ExitCode {
             };
 
             // Build socket forwarding config: CLI flags override config file
-            let loaded_config = Config::from_env().unwrap_or_default();
             let socket_forwarding = if no_socket_forwarding {
                 SocketForwardingConfig {
                     enabled: false,
