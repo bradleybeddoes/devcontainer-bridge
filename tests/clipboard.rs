@@ -122,21 +122,31 @@ exit 1
                     "daemon exited: {}",
                     fs::read_to_string(daemon.root.path().join("daemon.log")).unwrap()
                 );
-                if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", control_port)).await {
-                    control::write_message(&mut stream, &Message::Ping)
+                let probe = async {
+                    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", control_port)).await
+                    else {
+                        return false;
+                    };
+                    if control::write_message(&mut stream, &Message::Ping)
                         .await
-                        .unwrap();
-                    assert!(matches!(
-                        control::read_message(&mut BufReader::new(stream))
-                            .await
-                            .unwrap(),
-                        Message::Pong
-                    ));
-                    if TcpStream::connect(("127.0.0.1", data_port)).await.is_ok() {
-                        break;
+                        .is_err()
+                    {
+                        return false;
                     }
+                    matches!(
+                        control::read_message(&mut BufReader::new(stream)).await,
+                        Ok(Message::Pong)
+                    ) && TcpStream::connect(("127.0.0.1", data_port)).await.is_ok()
+                };
+                // Retry transient connection failures within the startup deadline,
+                // spacing probes so they do not flood the daemon's accept loop.
+                if tokio::time::timeout(Duration::from_millis(500), probe)
+                    .await
+                    .unwrap_or(false)
+                {
+                    break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
