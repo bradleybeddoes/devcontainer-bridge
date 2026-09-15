@@ -143,9 +143,9 @@ Host Path                                          Container Path
 
 ## Clipboard Images
 
-Save a host clipboard PNG or JPEG inside the container with `dbr paste`. Enable access on the host with `dbr host-daemon --allow-clipboard` and provide the same authentication token in the container. Stop any existing host daemon with `dbr stop` before enabling access.
+Save a host clipboard PNG or JPEG inside the container with `dbr paste`. Enable access persistently with `[clipboard] enabled = true` in the host’s `~/.config/dbr/config.toml`, then run `dbr restart`. Provide the same authentication token in the container. `host-daemon --allow-clipboard` also enables access for one run; `--no-clipboard` disables it for one run.
 
-The command prints the saved image path; `--tmux-target` can insert it into a specific container tmux pane without submitting input. Files remain until you remove them. See the [clipboard guide](docs/clipboard.md) for setup, PNG/JPEG behavior, a tmux shortcut, and privacy details.
+The command prints the saved image path; `--tmux-target` can insert it into a specific container tmux pane without submitting input. Files remain until you remove them. This feature is not yet in a published release. See the [clipboard guide](docs/clipboard.md) for source installation that survives Mac restarts and container rebuilds, PNG/JPEG behavior, a tmux shortcut, and privacy details.
 
 ## CLI Usage
 
@@ -167,7 +167,7 @@ dbr paste             Save a host clipboard PNG/JPEG (--format, --tmux-target)
 ```bash
 dbr host-daemon [--bind-addr ADDR] [--no-docker-detect]
                 [--control-port PORT] [--data-port PORT]
-                [--browser-cmd COMMAND] [--allow-clipboard]
+                [--browser-cmd COMMAND] [--allow-clipboard | --no-clipboard]
                 [--auth-token TOKEN] [--auth-token-file PATH] [--no-auth]
                 [--socket-watch-paths GLOBS]
                 [--socket-container-path-prefix PATH]
