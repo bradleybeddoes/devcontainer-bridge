@@ -1,19 +1,13 @@
-# v0.4.1
+# v0.4.2
 
-## Finder image files on macOS
+## Reliable macOS upgrades
 
-- `dbr paste` now transfers the contents of one local PNG or JPEG file copied in Finder instead of capturing Finder's rendered file icon.
-- Unreadable, oversized, unsupported, and multiple file selections fail rather than falling back to an icon.
-- Image data copied from applications such as Preview continues to use the existing PNG/JPEG and TIFF conversion paths.
-
-## Socket forwarding reliability
-
-- Reverse Unix-socket connections no longer fail when the data connection reaches the host just before its control request is processed.
+- The host installer now stages the downloaded executable in `/usr/local/bin` and atomically renames it into place.
+- This avoids modifying signed Mach-O code in place, which can leave stale code-signature state in the macOS kernel and cause the upgraded binary to be killed on launch.
+- Fresh installs and Linux installs retain their existing behavior.
 
 ## Upgrade
 
-The protocol is unchanged and v0.4.0 clients remain compatible. Upgrade the host binary to v0.4.1 and restart the running host daemon.
-
-Clipboard sharing remains opt-in and authenticated. A client with the host token can request supported clipboard contents without per-request confirmation. Transfers remain limited to 20 MiB and use the bridge's existing unencrypted transport; keep its ports on the trusted host/container network.
+The protocol and application behavior are unchanged. Upgrade the macOS host with the v0.4.2 installer; v0.4.1 container clients remain compatible and do not need to be upgraded for this installer fix.
 
 Written by Codex; exact model unavailable.

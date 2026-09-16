@@ -2,6 +2,12 @@
 
 Notable changes to `devcontainer-bridge` are documented here.
 
+## [0.4.2] - 2026-09-16
+
+### Fixed
+
+- Host upgrades now replace the installed executable atomically instead of overwriting signed code in place, preventing macOS from killing the new binary because of stale kernel code-signature state.
+
 ## [0.4.1] - 2026-09-16
 
 ### Fixed
@@ -21,6 +27,7 @@ Notable changes to `devcontainer-bridge` are documented here.
 
 - Invalid host configuration now stops daemon startup instead of silently using defaults.
 
+[0.4.2]: https://github.com/bradleybeddoes/devcontainer-bridge/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/bradleybeddoes/devcontainer-bridge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/bradleybeddoes/devcontainer-bridge/releases/tag/v0.4.0
 
