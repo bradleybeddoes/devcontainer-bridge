@@ -2,7 +2,7 @@
 
 Notable changes to `devcontainer-bridge` are documented here.
 
-## [0.4.1] - 2026-09-15
+## [0.4.1] - 2026-09-16
 
 ### Fixed
 
