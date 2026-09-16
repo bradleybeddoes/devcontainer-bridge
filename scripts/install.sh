@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="bradleybeddoes/devcontainer-bridge"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${DBR_INSTALL_DIR:-/usr/local/bin}"
 
 # Determine version (latest release if not specified)
 VERSION="${DBR_VERSION:-}"
@@ -45,7 +45,20 @@ echo "Installing dbr ${VERSION} for ${TARGET}..."
 
 # Download binary and checksum
 TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+STAGED_BINARY=""
+INSTALL_WITH_SUDO=false
+
+cleanup() {
+  rm -rf "$TMPDIR"
+  if [ -n "$STAGED_BINARY" ] && [ -e "$STAGED_BINARY" ]; then
+    if [ "$INSTALL_WITH_SUDO" = true ]; then
+      sudo rm -f "$STAGED_BINARY"
+    else
+      rm -f "$STAGED_BINARY"
+    fi
+  fi
+}
+trap cleanup EXIT
 
 curl -fsSL -o "${TMPDIR}/dbr" "$DOWNLOAD_URL"
 curl -fsSL -o "${TMPDIR}/dbr.sha256" "$CHECKSUM_URL"
@@ -69,13 +82,21 @@ else
   echo "Warning: no sha256sum or shasum found, skipping checksum verification" >&2
 fi
 
-# Install
-chmod +x dbr
+# Install through a new file in the destination directory, then atomically
+# replace the old path. Overwriting signed Mach-O code in place can leave
+# stale signature data in the macOS kernel cache and cause SIGKILL on launch.
 echo "Installing to ${INSTALL_DIR}/dbr..."
 if [ -w "$INSTALL_DIR" ]; then
-  cp dbr "${INSTALL_DIR}/dbr"
+  STAGED_BINARY=$(mktemp "${INSTALL_DIR}/.dbr.XXXXXX")
+  install -m 0755 dbr "$STAGED_BINARY"
+  mv -f "$STAGED_BINARY" "${INSTALL_DIR}/dbr"
+  STAGED_BINARY=""
 else
-  sudo cp dbr "${INSTALL_DIR}/dbr"
+  INSTALL_WITH_SUDO=true
+  STAGED_BINARY=$(sudo mktemp "${INSTALL_DIR}/.dbr.XXXXXX")
+  sudo install -m 0755 dbr "$STAGED_BINARY"
+  sudo mv -f "$STAGED_BINARY" "${INSTALL_DIR}/dbr"
+  STAGED_BINARY=""
 fi
 
 # Create dbr-open hardlink
