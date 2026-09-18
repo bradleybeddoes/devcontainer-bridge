@@ -2,6 +2,12 @@
 
 Notable changes to `devcontainer-bridge` are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `dbr paste` now transfers every image in a macOS Finder selection instead of refusing multi-file copies. Images are saved side by side as `clipboard-1`, `clipboard-2`, and so on in one transfer directory, every path is printed, and `--tmux-target` inserts all of them. A selection is limited to 16 images and 64 MiB, and is transferred whole or not at all: any file that is not a PNG or JPEG matching the requested format fails the request.
+
 ## [0.4.2] - 2026-09-16
 
 ### Fixed
@@ -31,4 +37,4 @@ Notable changes to `devcontainer-bridge` are documented here.
 [0.4.1]: https://github.com/bradleybeddoes/devcontainer-bridge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/bradleybeddoes/devcontainer-bridge/releases/tag/v0.4.0
 
-Written by Codex; exact model unavailable.
+Written by Codex; exact model unavailable. Multi-image clipboard entry written by Claude (claude-opus-5).

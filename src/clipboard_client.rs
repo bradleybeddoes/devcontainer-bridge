@@ -1,4 +1,4 @@
-//! Receive host clipboard images as private local files, optionally pasting a path into tmux.
+//! Receive host clipboard images as private local files, optionally pasting their paths into tmux.
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -10,12 +10,21 @@ use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 
-use crate::clipboard_capture::MAX_IMAGE_BYTES;
+use crate::clipboard_capture::{MAX_BATCH_BYTES, MAX_BATCH_IMAGES, MAX_IMAGE_BYTES};
 use crate::control::{self, ControlError};
 use crate::protocol::{ClipboardFormat, ClipboardToken, Message};
 
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 const TMUX_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Images saved by one clipboard transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedImages {
+    /// Private directory holding every image of this transfer.
+    pub directory: PathBuf,
+    /// Saved image files, in clipboard order.
+    pub paths: Vec<PathBuf>,
+}
 
 /// Failure to receive an image or insert its local path.
 #[derive(Debug, Error)]
@@ -41,34 +50,36 @@ pub enum PasteError {
     /// tmux target could not be validated before reading the clipboard.
     #[error("cannot use tmux target: {0}")]
     Tmux(String),
-    /// Image is saved, but tmux insertion failed.
-    #[error("image saved at {path}, but tmux insertion failed: {reason}")]
+    /// Images are saved, but tmux insertion failed.
+    #[error("images saved in {directory}, but tmux insertion failed: {reason}")]
     TmuxPaste {
-        /// The retained image file.
-        path: PathBuf,
+        /// The retained transfer directory.
+        directory: PathBuf,
         /// The tmux error.
         reason: String,
     },
 }
 
-/// Save a PNG or JPEG from the host clipboard and optionally type its quoted path into tmux.
+/// Save every PNG or JPEG from the host clipboard and optionally type their quoted paths into tmux.
 ///
-/// `addr` is the host data port. A tmux target must be an exact pane ID (`%123`)
-/// on the server selected by the inherited `TMUX` environment variable. The
-/// path is inserted literally, shell-quoted and followed by a space, without an Enter key. Successful
-/// files are retained until the caller removes them.
+/// `addr` is the host data port. Copying several image files on the host saves
+/// one file per image in a single transfer directory. A tmux target must be an
+/// exact pane ID (`%123`) on the server selected by the inherited `TMUX`
+/// environment variable. Paths are inserted literally, shell-quoted and each
+/// followed by a space, without an Enter key. Successful files are retained
+/// until the caller removes them.
 ///
 /// # Errors
 /// Returns an error for a failed transfer, invalid image signature, unsafe output
 /// path, or invalid tmux pane. A tmux insertion failure retains the completed
-/// image and reports its path in [`PasteError::TmuxPaste`].
+/// images and reports their directory in [`PasteError::TmuxPaste`].
 pub async fn paste(
     addr: SocketAddr,
     auth_token: &str,
     format: ClipboardFormat,
     output_dir: &Path,
     tmux_target: Option<&str>,
-) -> Result<PathBuf, PasteError> {
+) -> Result<SavedImages, PasteError> {
     if let Some(target) = tmux_target {
         validate_tmux(target).await?;
     }
@@ -83,57 +94,85 @@ pub async fn paste(
             },
         )
         .await?;
-        receive_image(&mut BufReader::new(stream), format).await
+        receive_images(&mut BufReader::new(stream), format).await
     };
-    let (received_format, bytes) = tokio::time::timeout(TRANSFER_TIMEOUT, transfer)
+    let images = tokio::time::timeout(TRANSFER_TIMEOUT, transfer)
         .await
         .map_err(|_| PasteError::Timeout)??;
-    let path = save_image(&output_dir, received_format, &bytes)?;
+    let saved = save_images(&output_dir, &images)?;
     if let Some(target) = tmux_target {
-        let quoted = format!("{} ", quote_path(&path)?);
+        let mut quoted = String::new();
+        for path in &saved.paths {
+            quoted.push_str(&quote_path(path)?);
+            quoted.push(' ');
+        }
         tmux(&["send-keys", "-l", "-t", target, "--", &quoted])
             .await
             .map_err(|reason| PasteError::TmuxPaste {
-                path: path.clone(),
+                directory: saved.directory.clone(),
                 reason,
             })?;
     }
-    Ok(path)
+    Ok(saved)
 }
 
-async fn receive_image<R: AsyncBufRead + Unpin>(
+async fn receive_images<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     requested: ClipboardFormat,
-) -> Result<(ClipboardFormat, Vec<u8>), PasteError> {
-    let (format, size) = match control::read_message(reader).await? {
-        Message::ClipboardReady { format, size } => (format, size),
-        Message::ClipboardError { error } => return Err(PasteError::Host(error)),
-        _ => return Err(PasteError::InvalidResponse("expected ClipboardReady")),
+) -> Result<Vec<(ClipboardFormat, Vec<u8>)>, PasteError> {
+    // A single image arrives without a count so older hosts remain readable.
+    let mut buffered = None;
+    let count = match control::read_message(reader).await? {
+        Message::ClipboardBatchReady { count } => count,
+        message => {
+            buffered = Some(message);
+            1
+        }
     };
-    if format == ClipboardFormat::Auto
-        || (requested != ClipboardFormat::Auto && requested != format)
-    {
-        return Err(PasteError::InvalidResponse("unexpected image format"));
-    }
-    if size == 0 || size > MAX_IMAGE_BYTES as u64 {
+    if count == 0 || count as usize > MAX_BATCH_IMAGES {
         return Err(PasteError::InvalidResponse(
-            "image size is outside the allowed range",
+            "image count is outside the allowed range",
         ));
     }
-    let mut bytes = vec![0; size as usize];
-    // Retain the same reader: the JSON read may already have buffered image bytes.
-    reader.read_exact(&mut bytes).await?;
-    let matches = match format {
-        ClipboardFormat::Png => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-        ClipboardFormat::Jpeg => bytes.starts_with(b"\xff\xd8\xff"),
-        ClipboardFormat::Auto => false,
-    };
-    if !matches {
-        return Err(PasteError::InvalidResponse(
-            "image signature does not match its format",
-        ));
+    let mut images = Vec::with_capacity(count as usize);
+    let mut total: u64 = 0;
+    for _ in 0..count {
+        let message = match buffered.take() {
+            Some(message) => message,
+            None => control::read_message(reader).await?,
+        };
+        let (format, size) = match message {
+            Message::ClipboardReady { format, size } => (format, size),
+            Message::ClipboardError { error } => return Err(PasteError::Host(error)),
+            _ => return Err(PasteError::InvalidResponse("expected ClipboardReady")),
+        };
+        if format == ClipboardFormat::Auto
+            || (requested != ClipboardFormat::Auto && requested != format)
+        {
+            return Err(PasteError::InvalidResponse("unexpected image format"));
+        }
+        total = total.saturating_add(size);
+        if size == 0 || size > MAX_IMAGE_BYTES as u64 || total > MAX_BATCH_BYTES as u64 {
+            return Err(PasteError::InvalidResponse(
+                "image size is outside the allowed range",
+            ));
+        }
+        let mut bytes = vec![0; size as usize];
+        // Retain the same reader: the JSON read may already have buffered image bytes.
+        reader.read_exact(&mut bytes).await?;
+        let matches = match format {
+            ClipboardFormat::Png => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            ClipboardFormat::Jpeg => bytes.starts_with(b"\xff\xd8\xff"),
+            ClipboardFormat::Auto => false,
+        };
+        if !matches {
+            return Err(PasteError::InvalidResponse(
+                "image signature does not match its format",
+            ));
+        }
+        images.push((format, bytes));
     }
-    Ok((format, bytes))
+    Ok(images)
 }
 
 fn absolute_output_dir(path: &Path) -> Result<PathBuf, PasteError> {
@@ -154,7 +193,10 @@ fn absolute_output_dir(path: &Path) -> Result<PathBuf, PasteError> {
     Ok(path)
 }
 
-fn save_image(dir: &Path, format: ClipboardFormat, bytes: &[u8]) -> Result<PathBuf, PasteError> {
+fn save_images(
+    dir: &Path,
+    images: &[(ClipboardFormat, Vec<u8>)],
+) -> Result<SavedImages, PasteError> {
     // Refuse existing symlink components rather than writing through them.
     let mut current = PathBuf::new();
     for component in dir.components() {
@@ -186,28 +228,37 @@ fn save_image(dir: &Path, format: ClipboardFormat, bytes: &[u8]) -> Result<PathB
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
     let transfer_dir = builder.tempdir_in(dir)?;
-    let filename = match format {
-        ClipboardFormat::Png => "clipboard.png",
-        ClipboardFormat::Jpeg => "clipboard.jpg",
-        ClipboardFormat::Auto => {
-            return Err(PasteError::InvalidResponse("unspecified image format"))
+    let mut paths = Vec::with_capacity(images.len());
+    for (index, (format, bytes)) in images.iter().enumerate() {
+        let extension = match format {
+            ClipboardFormat::Png => "png",
+            ClipboardFormat::Jpeg => "jpg",
+            ClipboardFormat::Auto => {
+                return Err(PasteError::InvalidResponse("unspecified image format"))
+            }
+        };
+        let filename = if images.len() == 1 {
+            format!("clipboard.{extension}")
+        } else {
+            format!("clipboard-{}.{extension}", index + 1)
+        };
+        let path = transfer_dir.path().join(filename);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-    };
-    let path = transfer_dir.path().join(filename);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        let mut file = options.open(&path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        paths.push(path);
     }
-    let mut file = options.open(&path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
     // TempDir removes partial files on every earlier error.
-    let _ = transfer_dir.keep();
-    Ok(path)
+    let directory = transfer_dir.keep();
+    Ok(SavedImages { directory, paths })
 }
 
 fn quote_path(path: &Path) -> Result<String, PasteError> {
@@ -266,6 +317,15 @@ mod tests {
         frame
     }
 
+    fn batched(count: u32, frames: &[Vec<u8>]) -> Vec<u8> {
+        let mut stream = serde_json::to_vec(&Message::ClipboardBatchReady { count }).unwrap();
+        stream.push(b'\n');
+        for frame in frames {
+            stream.extend_from_slice(frame);
+        }
+        stream
+    }
+
     #[tokio::test]
     async fn keeps_image_bytes_buffered_with_header() {
         for (format, bytes) in [
@@ -274,32 +334,69 @@ mod tests {
         ] {
             let frame = framed(format, bytes.len() as u64, bytes);
             let mut reader = BufReader::new(frame.as_slice());
-            let (actual_format, actual_bytes) = receive_image(&mut reader, ClipboardFormat::Auto)
+            let images = receive_images(&mut reader, ClipboardFormat::Auto)
                 .await
                 .unwrap();
-            assert_eq!(actual_format, format);
-            assert_eq!(actual_bytes, bytes);
+            assert_eq!(images, vec![(format, bytes.to_vec())]);
         }
     }
 
     #[tokio::test]
+    async fn reads_every_image_announced_by_a_batch_header() {
+        let png = b"\x89PNG\r\n\x1a\nfirst".as_slice();
+        let jpeg = b"\xff\xd8\xffsecond".as_slice();
+        let frames = [
+            framed(ClipboardFormat::Png, png.len() as u64, png),
+            framed(ClipboardFormat::Jpeg, jpeg.len() as u64, jpeg),
+        ];
+        let stream = batched(2, &frames);
+        let images = receive_images(
+            &mut BufReader::new(stream.as_slice()),
+            ClipboardFormat::Auto,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            images,
+            vec![
+                (ClipboardFormat::Png, png.to_vec()),
+                (ClipboardFormat::Jpeg, jpeg.to_vec()),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_truncated_oversized_and_mismatched_images() {
-        for frame in [
+        let png = b"\x89PNG\r\n\x1a\n".as_slice();
+        let frame = || framed(ClipboardFormat::Png, png.len() as u64, png);
+        for stream in [
             framed(ClipboardFormat::Png, 100, b"\x89PNG\r\n\x1a\n"),
             framed(ClipboardFormat::Png, MAX_IMAGE_BYTES as u64 + 1, b""),
             framed(ClipboardFormat::Png, 3, b"bad"),
             framed(ClipboardFormat::Auto, 3, b"bad"),
             framed(ClipboardFormat::Png, 0, b""),
+            // A batch that stops short of its announced count.
+            batched(2, &[frame()]),
+            batched(0, &[]),
+            batched(MAX_BATCH_IMAGES as u32 + 1, &[frame()]),
+            batched(
+                2,
+                &[
+                    framed(ClipboardFormat::Png, MAX_BATCH_BYTES as u64, png),
+                    framed(ClipboardFormat::Png, MAX_BATCH_BYTES as u64, png),
+                ],
+            ),
         ] {
-            assert!(
-                receive_image(&mut BufReader::new(frame.as_slice()), ClipboardFormat::Auto)
-                    .await
-                    .is_err()
-            );
+            assert!(receive_images(
+                &mut BufReader::new(stream.as_slice()),
+                ClipboardFormat::Auto
+            )
+            .await
+            .is_err());
         }
-        let frame = framed(ClipboardFormat::Jpeg, 3, b"\xff\xd8\xff");
+        let stream = framed(ClipboardFormat::Jpeg, 3, b"\xff\xd8\xff");
         assert!(
-            receive_image(&mut BufReader::new(frame.as_slice()), ClipboardFormat::Png)
+            receive_images(&mut BufReader::new(stream.as_slice()), ClipboardFormat::Png)
                 .await
                 .is_err()
         );
@@ -340,22 +437,37 @@ mod tests {
     fn private_unique_files_and_cleanup_on_failure() {
         let root = tempfile::tempdir().unwrap();
         let physical_root = root.path().canonicalize().unwrap();
-        let first = save_image(&physical_root, ClipboardFormat::Png, b"first").unwrap();
-        let second = save_image(&physical_root, ClipboardFormat::Jpeg, b"second").unwrap();
-        assert_ne!(first.parent(), second.parent());
-        assert_eq!(std::fs::read(&first).unwrap(), b"first");
-        assert_eq!(std::fs::read(&second).unwrap(), b"second");
-        assert!(save_image(&physical_root, ClipboardFormat::Auto, b"bad").is_err());
+        let first =
+            save_images(&physical_root, &[(ClipboardFormat::Png, b"first".to_vec())]).unwrap();
+        let second = save_images(
+            &physical_root,
+            &[(ClipboardFormat::Jpeg, b"second".to_vec())],
+        )
+        .unwrap();
+        assert_ne!(first.directory, second.directory);
+        assert_eq!(
+            first.paths,
+            vec![first.directory.join("clipboard.png")],
+            "a lone image keeps its unnumbered name"
+        );
+        assert_eq!(second.paths, vec![second.directory.join("clipboard.jpg")]);
+        assert_eq!(std::fs::read(&first.paths[0]).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second.paths[0]).unwrap(), b"second");
+        assert!(save_images(&physical_root, &[(ClipboardFormat::Auto, b"bad".to_vec())]).is_err());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                std::fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+                std::fs::metadata(&first.paths[0])
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
                 0o600
             );
             assert_eq!(
-                std::fs::metadata(first.parent().unwrap())
+                std::fs::metadata(&first.directory)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -363,6 +475,40 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn numbers_several_images_inside_one_transfer_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let physical_root = root.path().canonicalize().unwrap();
+        let saved = save_images(
+            &physical_root,
+            &[
+                (ClipboardFormat::Png, b"first".to_vec()),
+                (ClipboardFormat::Jpeg, b"second".to_vec()),
+                (ClipboardFormat::Png, b"third".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            saved.paths,
+            ["clipboard-1.png", "clipboard-2.jpg", "clipboard-3.png"]
+                .map(|name| saved.directory.join(name))
+                .to_vec()
+        );
+        assert_eq!(std::fs::read(&saved.paths[2]).unwrap(), b"third");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+
+        // A later unwritable image discards the whole transfer.
+        assert!(save_images(
+            &physical_root,
+            &[
+                (ClipboardFormat::Png, b"first".to_vec()),
+                (ClipboardFormat::Auto, b"bad".to_vec()),
+            ],
+        )
+        .is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
@@ -374,7 +520,7 @@ mod tests {
         std::fs::create_dir(&destination).unwrap();
         let link = physical_root.join("link");
         std::os::unix::fs::symlink(&destination, &link).unwrap();
-        assert!(save_image(&link, ClipboardFormat::Png, b"data").is_err());
+        assert!(save_images(&link, &[(ClipboardFormat::Png, b"data".to_vec())]).is_err());
         assert_eq!(std::fs::read_dir(destination).unwrap().count(), 0);
     }
 

@@ -143,9 +143,9 @@ Host Path                                          Container Path
 
 ## Clipboard Images
 
-Save a host clipboard PNG or JPEG inside the container with `dbr paste`. Enable access persistently with `[clipboard] enabled = true` in the host’s `~/.config/dbr/config.toml`, then run `dbr restart`. Provide the same authentication token in the container. `host-daemon --allow-clipboard` also enables access for one run; `--no-clipboard` disables it for one run.
+Save host clipboard PNG or JPEG images inside the container with `dbr paste`, including several files copied together in Finder. Enable access persistently with `[clipboard] enabled = true` in the host’s `~/.config/dbr/config.toml`, then run `dbr restart`. Provide the same authentication token in the container. `host-daemon --allow-clipboard` also enables access for one run; `--no-clipboard` disables it for one run.
 
-The command prints the saved image path; `--tmux-target` can insert it into a specific container tmux pane without submitting input. Files remain until you remove them. Clipboard image transfer was added in **v0.4.0**; copying PNG/JPEG files directly from macOS Finder is supported in **v0.4.1**. See the [clipboard guide](docs/clipboard.md) for pinned release installation that survives Mac restarts and container rebuilds, PNG/JPEG behavior, a tmux shortcut, and privacy details.
+The command prints one saved image path per line; `--tmux-target` can insert them into a specific container tmux pane without submitting input. Files remain until you remove them. Clipboard image transfer was added in **v0.4.0**; copying PNG/JPEG files directly from macOS Finder is supported in **v0.4.1**, and copying several at once is supported in **v0.5.0**. See the [clipboard guide](docs/clipboard.md) for pinned release installation that survives Mac restarts and container rebuilds, PNG/JPEG behavior, a tmux shortcut, and privacy details.
 
 ## CLI Usage
 
@@ -159,7 +159,7 @@ dbr status            Show active port and socket forwards (--auth-token)
 dbr forward PORT      Manually forward a port (--auth-token)
 dbr unforward PORT    Manually remove a port forward (--auth-token)
 dbr open URL          Open a URL in the host browser (--auth-token)
-dbr paste             Save a host clipboard PNG/JPEG (--format, --tmux-target)
+dbr paste             Save host clipboard PNG/JPEG images (--format, --tmux-target)
 ```
 
 ### Host Daemon
@@ -369,4 +369,4 @@ On Apple Silicon macOS, `cross` does not work reliably for `aarch64-unknown-linu
 
 See [LICENSE](LICENSE) for details.
 
-Clipboard additions written by Codex; exact model unavailable.
+Clipboard additions written by Codex; exact model unavailable. Multi-image clipboard support written by Claude (claude-opus-5).

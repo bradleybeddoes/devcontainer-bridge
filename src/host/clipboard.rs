@@ -3,7 +3,7 @@
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
-use crate::clipboard_capture;
+use crate::clipboard_capture::{self, ClipboardImage};
 use crate::control::{self, ControlError};
 use crate::protocol::{ClipboardFormat, ClipboardToken, Message};
 
@@ -23,7 +23,7 @@ impl ClipboardService {
         }
     }
 
-    /// Authenticate before touching the clipboard, then stream a bounded image.
+    /// Authenticate before touching the clipboard, then stream bounded images.
     pub(super) async fn serve<W: AsyncWrite + Unpin>(
         &self,
         writer: &mut W,
@@ -51,29 +51,45 @@ impl ClipboardService {
             )
             .await;
         };
-        let bytes = match clipboard_capture::capture(format).await {
-            Ok(bytes) => bytes,
+        let images = match clipboard_capture::capture(format).await {
+            Ok(images) => images,
             Err(error) => return reject(writer, &error.to_string()).await,
         };
-        // Capture validates PNG/JPEG signatures. Preserve whichever representation
-        // the clipboard supplied when the request was automatic.
-        let actual_format = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            ClipboardFormat::Png
-        } else {
-            ClipboardFormat::Jpeg
-        };
-        control::write_message(
-            writer,
-            &Message::ClipboardReady {
-                format: actual_format,
-                size: bytes.len() as u64,
-            },
-        )
-        .await?;
-        writer.write_all(&bytes).await?;
+        write_images(writer, &images).await?;
         writer.shutdown().await?;
         Ok(())
     }
+}
+
+/// Stream captured images, announcing the count only for multi-image selections.
+///
+/// A single image keeps the original one-header response so clients released
+/// before batch support continue to read it.
+async fn write_images<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    images: &[ClipboardImage],
+) -> Result<(), ControlError> {
+    if images.len() > 1 {
+        control::write_message(
+            writer,
+            &Message::ClipboardBatchReady {
+                count: images.len() as u32,
+            },
+        )
+        .await?;
+    }
+    for image in images {
+        control::write_message(
+            writer,
+            &Message::ClipboardReady {
+                format: image.format,
+                size: image.bytes.len() as u64,
+            },
+        )
+        .await?;
+        writer.write_all(&image.bytes).await?;
+    }
+    Ok(())
 }
 
 async fn reject<W: AsyncWrite + Unpin>(writer: &mut W, error: &str) -> Result<(), ControlError> {
@@ -115,6 +131,55 @@ mod tests {
             };
             assert!(error.contains(reason));
         }
+    }
+
+    #[tokio::test]
+    async fn only_multi_image_responses_announce_a_count() {
+        let png = ClipboardImage {
+            format: ClipboardFormat::Png,
+            bytes: b"\x89PNG\r\n\x1a\nfirst".to_vec(),
+        };
+        let jpeg = ClipboardImage {
+            format: ClipboardFormat::Jpeg,
+            bytes: b"\xff\xd8\xffsecond".to_vec(),
+        };
+
+        let mut output = Vec::new();
+        write_images(&mut output, std::slice::from_ref(&png))
+            .await
+            .unwrap();
+        let mut reader = &output[..];
+        assert_eq!(
+            control::read_message(&mut reader).await.unwrap(),
+            Message::ClipboardReady {
+                format: ClipboardFormat::Png,
+                size: png.bytes.len() as u64,
+            }
+        );
+        assert_eq!(reader, png.bytes);
+
+        let mut output = Vec::new();
+        write_images(&mut output, &[png.clone(), jpeg.clone()])
+            .await
+            .unwrap();
+        let mut reader = &output[..];
+        assert_eq!(
+            control::read_message(&mut reader).await.unwrap(),
+            Message::ClipboardBatchReady { count: 2 }
+        );
+        for image in [&png, &jpeg] {
+            assert_eq!(
+                control::read_message(&mut reader).await.unwrap(),
+                Message::ClipboardReady {
+                    format: image.format,
+                    size: image.bytes.len() as u64,
+                }
+            );
+            let (bytes, rest) = reader.split_at(image.bytes.len());
+            assert_eq!(bytes, image.bytes);
+            reader = rest;
+        }
+        assert!(reader.is_empty());
     }
 
     #[tokio::test]

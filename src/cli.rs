@@ -121,10 +121,10 @@ pub enum Command {
         no_socket_forwarding: bool,
     },
 
-    /// Save a host clipboard image locally, optionally pasting its path into tmux.
+    /// Save host clipboard images locally, optionally pasting their paths into tmux.
     ///
     /// Requires host-daemon --allow-clipboard and a valid authentication token.
-    /// Prints the absolute saved path. Never submits input or sends image bytes to tmux.
+    /// Prints one absolute saved path per line. Never submits input or sends image bytes to tmux.
     Paste {
         /// Image representation to request (auto prefers PNG, then JPEG).
         #[arg(long, value_enum, default_value = "auto")]

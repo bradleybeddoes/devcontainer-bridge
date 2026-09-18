@@ -1,6 +1,6 @@
 # Paste host clipboard images into a devcontainer
 
-`dbr paste` saves an image from the host clipboard as a local PNG or JPEG and prints its absolute path. It works with any application that accepts a file path. An optional tmux integration types that path into a chosen pane without pressing Enter.
+`dbr paste` saves the host clipboard's images as local PNG or JPEG files and prints their absolute paths, one per line. Copying several image files in Finder saves all of them. It works with any application that accepts a file path. An optional tmux integration types those paths into a chosen pane without pressing Enter.
 
 ## Enable on the host
 
@@ -94,10 +94,18 @@ Example output:
 /home/user/.cache/dbr/paste/image-a1b2c3/clipboard.png
 ```
 
-On macOS, copying one local PNG or JPEG file in Finder transfers that file's
-contents rather than Finder's rendered icon. Selecting multiple files is not
-supported. Other clipboard sources must provide image data; file references from
-Linux file managers are not supported.
+Copying several files in Finder saves one image per file:
+
+```text
+/home/user/.cache/dbr/paste/image-d4e5f6/clipboard-1.png
+/home/user/.cache/dbr/paste/image-d4e5f6/clipboard-2.jpg
+/home/user/.cache/dbr/paste/image-d4e5f6/clipboard-3.png
+```
+
+On macOS, copying local PNG or JPEG files in Finder transfers those files'
+contents rather than Finder's rendered icons. Images keep their Finder selection
+order. Other clipboard sources must provide image data, and supply one image
+only; file references from Linux file managers are not supported.
 
 Options:
 
@@ -115,12 +123,14 @@ dbr paste --host host.docker.internal --data-port 19286
 | `png` | Request PNG; macOS also supports TIFF-to-PNG conversion. |
 | `jpeg` | Require a native JPEG representation. PNG and TIFF are not converted to JPEG. |
 
-Native PNG and JPEG bytes are preserved. Images are limited to **20 MiB**; macOS TIFF conversion also limits dimensions to 40 million pixels. Other binary formats are not supported.
+Native PNG and JPEG bytes are preserved. Each image is limited to **20 MiB**, one selection to **16 images** and **64 MiB** in total; macOS TIFF conversion also limits dimensions to 40 million pixels. Other binary formats are not supported.
 
-For a single Finder file, the file reference is authoritative: `auto` accepts a
-PNG or JPEG based on its byte signature, while an explicit format requires the
-file to match. An unreadable, oversized, unsupported, or multiply selected file
-returns an error instead of transferring Finder's icon.
+For Finder files, the file references are authoritative: `auto` accepts a PNG or
+JPEG based on each file's byte signature, while an explicit format requires every
+file to match. Unreadable, oversized, or unsupported files return an error
+instead of transferring Finder's icons, and a selection is transferred whole or
+not at all — one unsupported file fails the entire request rather than silently
+saving the rest.
 
 ## Paste the path into tmux
 
@@ -136,7 +146,7 @@ Reload the configuration from a container tmux pane:
 tmux source-file ~/.tmux.conf
 ```
 
-Copy an image on the host, focus the destination application, then press your tmux prefix followed by **Shift-V**. The binding captures the destination pane ID when invoked and runs the transfer in the background. Configure token access for the tmux server's environment, or add `--auth-token-file /path/to/token` to the binding.
+Copy an image on the host, focus the destination application, then press your tmux prefix followed by **Shift-V**. The binding captures the destination pane ID when invoked and runs the transfer in the background. Every saved path is inserted, shell-quoted and separated by spaces, so copying several files fills the prompt with all of them. Configure token access for the tmux server's environment, or add `--auth-token-file /path/to/token` to the binding.
 
 ### Nested tmux and shared dotfiles
 
@@ -152,31 +162,33 @@ if-shell '[ -f /.dockerenv ] && dbr paste --help >/dev/null 2>&1' {
 
 This binds the key only in Docker containers with a clipboard-capable `dbr` installed. It does not change Command-V text paste. Prefix + Shift-V has no default binding in tmux 3.3a; check your own configuration with `tmux list-keys -T prefix V` before adding it.
 
-`--tmux-target` requires an exact pane ID such as `%3` and the inherited `TMUX` environment variable identifying its server. It inserts the saved path literally with shell quoting and does not submit the application's input. The receiving application decides how to use that path; dbr does not create application-specific attachments.
+`--tmux-target` requires an exact pane ID such as `%3` and the inherited `TMUX` environment variable identifying its server. It inserts the saved paths literally with shell quoting and does not submit the application's input. The receiving application decides how to use those paths; dbr does not create application-specific attachments.
 
-If insertion fails after the image was saved, the error reports the retained file's path.
+If insertion fails after the images were saved, the error reports the retained transfer directory.
 
 ## Files and privacy
 
-Each successful transfer creates a unique directory beneath `~/.cache/dbr/paste`, or your `--output-dir`. On Unix, transfer directories have mode `0700` and image files mode `0600`. Incomplete transfers do not leave image files behind.
+Each successful transfer creates a unique directory beneath `~/.cache/dbr/paste`, or your `--output-dir`. A single image is named `clipboard.png` or `clipboard.jpg`; a multi-image transfer numbers its files `clipboard-1`, `clipboard-2`, and so on in clipboard order, all inside that one directory. On Unix, transfer directories have mode `0700` and image files mode `0600`. Incomplete transfers do not leave image files behind.
 
 Output paths must not contain symlink components, `..`, or control characters. Use a physical directory path if your usual path contains a symlink.
 
 **Successful images stay on disk until you remove them.** There is no automatic expiry. Delete the individual image directory when the receiving application no longer needs it. Container storage still follows your container's normal persistence rules.
 
-Enabling clipboard access lets clients with the host token request supported clipboard images. On macOS, this includes the contents of a single PNG or JPEG file whose reference is currently on the clipboard. File paths are not logged or sent to the container. There is no continuous synchronization or per-request host confirmation. Disable access by setting `[clipboard] enabled = false` and restarting the daemon, or use `host-daemon --no-clipboard` for one run.
+Enabling clipboard access lets clients with the host token request supported clipboard images. On macOS, this includes the contents of every PNG or JPEG file whose reference is currently on the clipboard. File paths are not logged or sent to the container. There is no continuous synchronization or per-request host confirmation. Disable access by setting `[clipboard] enabled = false` and restarting the daemon, or use `host-daemon --no-clipboard` for one run.
 
 Transfers use the bridge's existing TCP transport, which is **not encrypted**. Keep its ports within your trusted host/container network; token authentication does not protect against network eavesdropping.
 
 ## Protocol and troubleshooting
 
-The CLI opens a dedicated connection to the existing host **data port** (default `19286`). It sends one JSON-line `ClipboardRead` message containing the requested format and authentication token. After checking opt-in and authentication, the host replies with a JSON-line `ClipboardReady` header containing the actual format and byte count, followed by raw image bytes. Failures return `ClipboardError`. Image bytes do not pass through terminal paste or the control channel, and the container daemon need not be running for this command.
+The CLI opens a dedicated connection to the existing host **data port** (default `19286`). It sends one JSON-line `ClipboardRead` message containing the requested format and authentication token. After checking opt-in and authentication, the host replies with a JSON-line `ClipboardReady` header containing the actual format and byte count, followed by raw image bytes. A multi-image transfer prefixes those with a single `ClipboardBatchReady` header carrying the count; a one-image transfer omits it, so hosts and clients that predate multi-image support still interoperate for single images. Failures return `ClipboardError`. Image bytes do not pass through terminal paste or the control channel, and the container daemon need not be running for this command.
 
 - **Sharing disabled:** set `[clipboard] enabled = true` on the host and restart it. `ensure` does not change an existing daemon.
 - **Authentication failed:** supply the same token the host daemon uses. `--no-auth` cannot grant clipboard access.
-- **No requested image:** copy image contents or one PNG/JPEG file in Finder; try `--format auto` if the explicit format does not match. Confirm the daemon can access your logged-in desktop session.
+- **No requested image:** copy image contents or PNG/JPEG files in Finder; try `--format auto` if the explicit format does not match. Confirm the daemon can access your logged-in desktop session.
+- **Every copied file must be a PNG or JPEG image:** the selection mixes images with another file type, or `--format png`/`--format jpeg` does not match every file. Reselect only matching images, or use `--format auto`.
+- **Connection or protocol error on a multi-image selection:** the container binary predates multi-image support. Upgrade it, or copy one file at a time.
 - **Connection or protocol error after upgrading:** upgrade both binaries and restart the host with clipboard access enabled. Check the host address and data port.
 - **tmux target error:** run from container tmux and use an exact pane ID on the server identified by `TMUX`.
 - **Transfer already in progress:** retry after the current transfer finishes; the host permits one at a time.
 
-Written by Codex; exact model unavailable.
+Written by Codex; exact model unavailable. Multi-image support written by Claude (claude-opus-5).

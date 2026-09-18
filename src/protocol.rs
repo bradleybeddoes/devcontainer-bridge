@@ -174,6 +174,15 @@ pub enum Message {
         auth_token: ClipboardToken,
     },
 
+    /// Announces that `count` `ClipboardReady` responses follow on this connection.
+    ///
+    /// Sent only for multi-image transfers so single-image responses stay
+    /// readable by clients that predate batch support.
+    ClipboardBatchReady {
+        /// Number of images that follow.
+        count: u32,
+    },
+
     /// Clipboard response header followed immediately by exactly `size` raw bytes.
     ClipboardReady {
         /// Actual representation; never `auto`.
@@ -367,6 +376,7 @@ mod tests {
                 format: ClipboardFormat::Auto,
                 auth_token: ClipboardToken("secret-token".into()),
             },
+            Message::ClipboardBatchReady { count: 3 },
             Message::ClipboardReady {
                 format: ClipboardFormat::Png,
                 size: 100_000,

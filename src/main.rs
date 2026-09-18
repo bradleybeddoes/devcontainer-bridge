@@ -235,7 +235,7 @@ fn main() -> ExitCode {
                     )
                     .join(".cache/dbr/paste"),
                 };
-                let path = dbr::clipboard_client::paste(
+                let saved = dbr::clipboard_client::paste(
                     addr,
                     &token,
                     format,
@@ -244,7 +244,9 @@ fn main() -> ExitCode {
                 )
                 .await
                 .map_err(|e| e.to_string())?;
-                println!("{}", path.display());
+                for path in saved.paths {
+                    println!("{}", path.display());
+                }
                 Ok::<(), String>(())
             })
         }
