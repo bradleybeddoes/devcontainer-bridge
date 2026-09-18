@@ -532,10 +532,10 @@ fn timestamp_now() -> String {
 /// Returns [`HostError`] if the daemon cannot start (e.g. port bind failure).
 pub async fn run(config: HostConfig) -> Result<(), HostError> {
     if config.allow_clipboard
-        && !config
+        && config
             .auth_token
             .as_ref()
-            .is_some_and(|token| !token.is_empty())
+            .is_none_or(|token| token.is_empty())
     {
         return Err(HostError::ClipboardRequiresAuth);
     }
