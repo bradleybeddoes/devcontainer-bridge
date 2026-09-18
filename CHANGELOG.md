@@ -2,7 +2,7 @@
 
 Notable changes to `devcontainer-bridge` are documented here.
 
-## [Unreleased]
+## [0.5.0] - 2026-09-18
 
 ### Added
 
@@ -33,6 +33,7 @@ Notable changes to `devcontainer-bridge` are documented here.
 
 - Invalid host configuration now stops daemon startup instead of silently using defaults.
 
+[0.5.0]: https://github.com/bradleybeddoes/devcontainer-bridge/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/bradleybeddoes/devcontainer-bridge/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/bradleybeddoes/devcontainer-bridge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/bradleybeddoes/devcontainer-bridge/releases/tag/v0.4.0

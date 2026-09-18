@@ -4,7 +4,7 @@
 
 ## Enable on the host
 
-Clipboard support and persistent configuration are available since **v0.4.0**. Install **v0.4.2** or later on the host and **v0.4.1** or later in the container using the instructions below, then create the host configuration directory if needed with `mkdir -p ~/.config/dbr`. In `~/.config/dbr/config.toml` **on the host**, add or update this section without replacing your other settings:
+Clipboard support and persistent configuration are available since **v0.4.0**. Install **v0.5.0** or later on both the host and the container for multi-image selections, or **v0.4.2** on the host and **v0.4.1** in the container for single images only, using the instructions below, then create the host configuration directory if needed with `mkdir -p ~/.config/dbr`. In `~/.config/dbr/config.toml` **on the host**, add or update this section without replacing your other settings:
 
 ```toml
 [clipboard]
@@ -36,7 +36,7 @@ If an older daemon is running, stop it with its existing `dbr stop` command befo
 Install the pinned release:
 
 ```sh
-curl -fsSL https://github.com/bradleybeddoes/devcontainer-bridge/releases/download/v0.4.2/install.sh | DBR_VERSION=v0.4.2 bash
+curl -fsSL https://github.com/bradleybeddoes/devcontainer-bridge/releases/download/v0.5.0/install.sh | DBR_VERSION=v0.5.0 bash
 /usr/local/bin/dbr --version
 /usr/local/bin/dbr paste --help
 ```
@@ -59,7 +59,7 @@ Pin the released binary in your existing feature configuration. Merge these fiel
 {
   "features": {
     "ghcr.io/bradleybeddoes/devcontainer-bridge/dbr:0": {
-      "version": "v0.4.2"
+      "version": "v0.5.0"
     }
   },
   "initializeCommand": ["/usr/local/bin/dbr", "ensure"]
