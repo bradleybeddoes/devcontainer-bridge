@@ -2,6 +2,12 @@
 
 Notable changes to `devcontainer-bridge` are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- The devcontainer feature (**0.3.0**) now restarts the container daemon if it exits unexpectedly. The entrypoint previously started it once at container boot with no supervision, so a crashed daemon left the container silently disconnected from the host until it was rebuilt. A clean exit, such as SIGTERM during container shutdown, still ends the loop.
+
 ## [0.5.0] - 2026-09-18
 
 ### Added
