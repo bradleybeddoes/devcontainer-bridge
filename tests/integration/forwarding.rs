@@ -1593,29 +1593,22 @@ mod socket_scanner_tests {
         let unix_listener = UnixListener::bind(&sock_path).unwrap();
 
         let echo_handle = tokio::spawn(async move {
-            loop {
-                match unix_listener.accept().await {
-                    Ok((mut stream, _)) => {
-                        tokio::spawn(async move {
-                            let mut buf = [0u8; 4096];
-                            loop {
-                                let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
-                                    .await
-                                {
-                                    Ok(0) | Err(_) => break,
-                                    Ok(n) => n,
-                                };
-                                if tokio::io::AsyncWriteExt::write_all(&mut stream, &buf[..n])
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        });
+            while let Ok((mut stream, _)) = unix_listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        if tokio::io::AsyncWriteExt::write_all(&mut stream, &buf[..n])
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
-                    Err(_) => break,
-                }
+                });
             }
         });
 
@@ -1744,29 +1737,22 @@ mod socket_scanner_tests {
         let unix_listener = UnixListener::bind(&sock_path).unwrap();
 
         let echo_handle = tokio::spawn(async move {
-            loop {
-                match unix_listener.accept().await {
-                    Ok((mut stream, _)) => {
-                        tokio::spawn(async move {
-                            let mut buf = [0u8; 4096];
-                            loop {
-                                let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
-                                    .await
-                                {
-                                    Ok(0) | Err(_) => break,
-                                    Ok(n) => n,
-                                };
-                                if tokio::io::AsyncWriteExt::write_all(&mut stream, &buf[..n])
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        });
+            while let Ok((mut stream, _)) = unix_listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        if tokio::io::AsyncWriteExt::write_all(&mut stream, &buf[..n])
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
-                    Err(_) => break,
-                }
+                });
             }
         });
 

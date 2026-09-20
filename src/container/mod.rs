@@ -743,8 +743,10 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_host_addr_returns_explicit_config() {
-        let mut config = Config::default();
-        config.host_addr = Some("10.0.0.1".to_string());
+        let config = Config {
+            host_addr: Some("10.0.0.1".to_string()),
+            ..Default::default()
+        };
         let result = resolve_host_addr(&config).await.unwrap();
         assert_eq!(result, "10.0.0.1");
     }
@@ -752,8 +754,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_host_addr_skips_fallbacks_with_explicit() {
         // Even with an unusual address, the explicit path returns it directly
-        let mut config = Config::default();
-        config.host_addr = Some("192.168.99.99".to_string());
+        let config = Config {
+            host_addr: Some("192.168.99.99".to_string()),
+            ..Default::default()
+        };
         let result = resolve_host_addr(&config).await.unwrap();
         assert_eq!(result, "192.168.99.99");
     }
