@@ -534,7 +534,10 @@ async fn run_session(
         tokio::select! {
             _ = scan_ticker.tick() => {
                 // Scan for listening ports
-                let current = match scanner::scan_listening_ports(params.proc_path, params.exclude_ports).await {
+                // Ports already forwarded keep their recorded process name, so
+                // re-resolving them every scan only burns /proc walks.
+                let resolved: HashSet<u16> = forwarded.keys().copied().collect();
+                let current = match scanner::scan_listening_ports(params.proc_path, params.exclude_ports, &resolved).await {
                     Ok(ports) => ports,
                     Err(e) => {
                         debug!(error = %e, "scan failed, skipping this cycle");
