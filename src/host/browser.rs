@@ -128,6 +128,9 @@ async fn open_in_browser(url: &str, browser_cmd: Option<&str>) -> Result<(), Bro
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        // The caller bounds this wait with a timeout, and dropping the future
+        // would otherwise leave a hung browser running with nothing tracking it.
+        .kill_on_drop(true)
         .status()
         .await
         .map_err(|e| BrowserError::OpenFailed(format!("{cmd}: {e}")))?;
@@ -415,6 +418,97 @@ mod tests {
         // timeout while waiting on the real subprocess.
         let result = opener.prepare("http://localhost:8080");
         assert!(result.is_ok());
+    }
+
+    // --- browser timeout tests ---
+
+    /// A sleep duration unique to this test process, so a stray left behind
+    /// by an earlier failed run is never mistaken for this run's child.
+    #[cfg(unix)]
+    fn unique_marker(offset: u32) -> String {
+        (20_000 + (std::process::id() % 10_000) * 3 + offset).to_string()
+    }
+
+    /// A browser command that never exits. `exec` keeps the pid, so killing
+    /// the direct child really stops it; without it `sleep` would survive as
+    /// an orphaned grandchild.
+    #[cfg(unix)]
+    fn hanging_browser(marker: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hang");
+        std::fs::write(&script, format!("#!/bin/sh\nexec sleep {marker}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, script)
+    }
+
+    /// `ps` rather than `pgrep`, whose `-f` does not reliably match an
+    /// `exec`ed child.
+    ///
+    /// Must not be called before the browser child is spawned: running any
+    /// other child first leaves that spawn's future hanging forever.
+    #[cfg(unix)]
+    fn browser_running(marker: &str) -> bool {
+        let out = std::process::Command::new("ps")
+            .arg("-ax")
+            .arg("-o")
+            .arg("command=")
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout).contains(&format!("sleep {marker}"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn launch_times_out_when_the_browser_never_exits() {
+        let (_dir, script) = hanging_browser(&unique_marker(0));
+        let result = launch("http://localhost:8080", script.to_str()).await;
+        assert!(matches!(result, Err(BrowserError::Timeout)), "{result:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timing_out_kills_the_browser_instead_of_orphaning_it() {
+        let marker = unique_marker(1);
+        let (_dir, script) = hanging_browser(&marker);
+
+        // A real clock, not `start_paused`: killing and reaping the child
+        // takes wall time, and that it happens at all is the point here.
+        // Scoped rather than `drop(fut)`: `tokio::pin!` yields a
+        // `Pin<&mut F>`, so dropping that drops a reference, not the future.
+        {
+            let fut = open_in_browser("http://localhost:8080", script.to_str());
+            tokio::pin!(fut);
+            let outcome = tokio::time::timeout(Duration::from_millis(300), &mut fut).await;
+            assert!(outcome.is_err(), "browser exited on its own: {outcome:?}");
+
+            // Poll rather than assert once: fork, exec and `ps` can each take
+            // longer than the timeout window on a loaded machine.
+            let mut started = false;
+            for _ in 0..100 {
+                if browser_running(&marker) {
+                    started = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(started, "browser never started");
+        }
+
+        for _ in 0..100 {
+            if !browser_running(&marker) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Best effort, so a failure here does not poison the next run.
+        let _ = std::process::Command::new("pkill")
+            .arg("-f")
+            .arg(format!("sleep {marker}"))
+            .status();
+        panic!("browser survived the dropped future");
     }
 
     // --- port map management tests ---

@@ -92,9 +92,20 @@ expect CPU from them.
   a synchronous `prepare()` under the lock; `launch()` runs without it, bounded
   by a 10s timeout. `prepare()` being non-`async` is what makes the lock
   impossible to hold across the await — that is enforced by the compiler rather
-  than by a test. **The 10s timeout itself has no automated test**: exercising
-  it needs a command that hangs, and doing that under a paused clock leaks the
-  process.
+  than by a test. Writing the test for the timeout then turned up a second
+  defect: `tokio::process::Command` defaults to `kill_on_drop(false)`, so the
+  timeout abandoned the hung browser rather than killing it, leaking one
+  process per `OpenUrl`. Both are covered now by
+  `launch_times_out_when_the_browser_never_exits` and
+  `timing_out_kills_the_browser_instead_of_orphaning_it`.
+
+  Two traps in that second test, both of which cost real time to find. A
+  `tokio::pin!`ed future must be dropped by leaving its scope — `drop(fut)`
+  drops the `Pin<&mut F>`, not the future, so the child survives and the test
+  fails for the wrong reason. And the child must be *polled* for rather than
+  asserted on immediately: fork, exec and `ps` together can exceed the timeout
+  window on a loaded machine, which looks exactly like the child never
+  starting.
 - **`MissedTickBehavior::Delay`** on the port scanner, the heartbeat and the
   socket scanner. Tokio defaults to `Burst`, which fires catch-up ticks back to
   back after a slow cycle. Measured as **not currently occurring** (see below);
