@@ -30,7 +30,14 @@ pub enum BrowserError {
     /// The browser open command failed.
     #[error("failed to open browser: {0}")]
     OpenFailed(String),
+
+    /// The browser command did not exit within the time limit.
+    #[error("browser command timed out after {}s", BROWSER_TIMEOUT.as_secs())]
+    Timeout,
 }
+
+/// Time limit for the browser process to exit.
+const BROWSER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Validate that a URL is safe to open in the host browser.
 ///
@@ -190,6 +197,21 @@ impl BrowserOpener {
     /// Returns [`BrowserError`] if validation fails, the rate limit is exceeded,
     /// or the browser command fails.
     pub async fn open(&mut self, url: &str) -> Result<(), BrowserError> {
+        let (rewritten, cmd) = self.prepare(url)?;
+        launch(&rewritten, cmd.as_deref()).await
+    }
+
+    /// Validate, rate-limit and rewrite a URL, returning it with the command to run.
+    ///
+    /// Separated from [`launch`] so a caller can release the browser lock before
+    /// waiting on the browser process. Forward, unforward and container cleanup
+    /// all take that same lock, so holding it across the wait would block port
+    /// forwarding for every container behind one slow browser.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowserError`] if validation fails or the rate limit is exceeded.
+    pub fn prepare(&mut self, url: &str) -> Result<(String, Option<String>), BrowserError> {
         validate_url(url)?;
 
         // Rate limiting: sliding window of 1 second.
@@ -217,11 +239,26 @@ impl BrowserOpener {
                 "rewrote URL port"
             );
         }
-
-        open_in_browser(&rewritten, self.browser_cmd.as_deref()).await?;
-        info!(url = rewritten.as_str(), "opened URL in browser");
-        Ok(())
+        Ok((rewritten, self.browser_cmd.clone()))
     }
+}
+
+/// Run the browser command for an already-prepared URL.
+///
+/// Holds no lock, so it is safe to await after releasing the browser mutex.
+/// A browser that never exits fails after [`BROWSER_TIMEOUT`] rather than
+/// stalling its caller indefinitely.
+///
+/// # Errors
+///
+/// Returns [`BrowserError`] if the command fails to spawn, exits non-zero, or
+/// does not exit within the time limit.
+pub async fn launch(url: &str, browser_cmd: Option<&str>) -> Result<(), BrowserError> {
+    tokio::time::timeout(BROWSER_TIMEOUT, open_in_browser(url, browser_cmd))
+        .await
+        .map_err(|_| BrowserError::Timeout)??;
+    info!(url, "opened URL in browser");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -372,8 +409,11 @@ mod tests {
         }
         // Advance past the 1-second window
         tokio::time::advance(Duration::from_secs(2)).await;
-        // Old entries should be pruned, allowing new opens
-        let result = opener.open("http://localhost:8080").await;
+        // Old entries should be pruned, allowing new opens. Check `prepare`
+        // rather than `open`: the rate limiter is what is under test, and with
+        // a paused clock the runtime would advance straight to `launch`'s
+        // timeout while waiting on the real subprocess.
+        let result = opener.prepare("http://localhost:8080");
         assert!(result.is_ok());
     }
 

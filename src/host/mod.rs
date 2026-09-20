@@ -925,17 +925,18 @@ async fn handle_control_connection(
             Ok(())
         }
         Message::OpenUrl { url } => {
-            // One-shot OpenUrl from `dbr open` (no registration needed)
-            let success = ctx
-                .browser
-                .lock()
-                .await
-                .open(&url)
-                .await
-                .inspect_err(|e| {
-                    warn!(%addr, url, error = %e, "failed to open URL");
-                })
-                .is_ok();
+            // One-shot OpenUrl from `dbr open` (no registration needed).
+            // Prepare under the lock, launch without it: the same lock guards
+            // forward handling, and a slow browser must not block it.
+            let prepared = ctx.browser.lock().await.prepare(&url);
+            let success = match prepared {
+                Ok((target, cmd)) => browser::launch(&target, cmd.as_deref()).await,
+                Err(e) => Err(e),
+            }
+            .inspect_err(|e| {
+                warn!(%addr, url, error = %e, "failed to open URL");
+            })
+            .is_ok();
             conn.send(&Message::OpenUrlAck { success }).await?;
             Ok(())
         }
@@ -1136,16 +1137,15 @@ async fn dispatch_container_message(
         }
 
         Message::OpenUrl { url } => {
-            let success = ctx
-                .browser
-                .lock()
-                .await
-                .open(&url)
-                .await
-                .inspect_err(|e| {
-                    warn!(container_id, url, error = %e, "failed to open URL");
-                })
-                .is_ok();
+            let prepared = ctx.browser.lock().await.prepare(&url);
+            let success = match prepared {
+                Ok((target, cmd)) => browser::launch(&target, cmd.as_deref()).await,
+                Err(e) => Err(e),
+            }
+            .inspect_err(|e| {
+                warn!(container_id, url, error = %e, "failed to open URL");
+            })
+            .is_ok();
             conn.send(&Message::OpenUrlAck { success }).await?;
             Ok(false)
         }
