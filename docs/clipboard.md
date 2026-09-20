@@ -36,7 +36,7 @@ If an older daemon is running, stop it with its existing `dbr stop` command befo
 Install the pinned release:
 
 ```sh
-curl -fsSL https://github.com/bradleybeddoes/devcontainer-bridge/releases/download/v0.5.0/install.sh | DBR_VERSION=v0.5.0 bash
+curl -fsSL https://github.com/bradleybeddoes/devcontainer-bridge/releases/download/v0.5.1/install.sh | DBR_VERSION=v0.5.1 bash
 /usr/local/bin/dbr --version
 /usr/local/bin/dbr paste --help
 ```
@@ -59,7 +59,7 @@ Pin the released binary in your existing feature configuration. Merge these fiel
 {
   "features": {
     "ghcr.io/bradleybeddoes/devcontainer-bridge/dbr:0": {
-      "version": "v0.5.0"
+      "version": "v0.5.1"
     }
   },
   "initializeCommand": ["/usr/local/bin/dbr", "ensure"]
