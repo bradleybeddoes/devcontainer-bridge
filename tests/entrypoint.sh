@@ -7,7 +7,7 @@ test_root=$(mktemp -d)
 
 # Matches only the supervising shell the entrypoint backgrounds, never a real
 # daemon process, so a failed assertion cannot leave a retry loop running.
-supervisor_pattern='dbr container-daemon --log-level warn && break'
+supervisor_pattern='dbr container-daemon.*status='
 
 stop_supervisors() {
   pkill -f "$supervisor_pattern" >/dev/null 2>&1 || true
@@ -34,7 +34,7 @@ EOF
 cat > "$mock_dir/dbr" <<'EOF'
 #!/bin/sh
 echo "$*" >> "$DBR_CALLS"
-[ "$(wc -l < "$DBR_CALLS")" -ge "$DBR_SUCCEED_ON" ]
+exit "${DBR_EXIT_CODE:-0}"
 EOF
 
 chmod 0755 "$mock_dir/sleep" "$mock_dir/dbr"
@@ -66,8 +66,8 @@ start_case() {
   : > "$DBR_CALLS"
 }
 
-# A daemon that keeps failing is restarted until it succeeds.
-export DBR_SUCCEED_ON=3
+# A daemon that keeps failing is restarted.
+export DBR_EXIT_CODE=1
 start_case
 output=$("$entrypoint" /bin/echo passthrough)
 [ "$output" = "passthrough" ] || {
@@ -75,6 +75,7 @@ output=$("$entrypoint" /bin/echo passthrough)
   exit 1
 }
 await_calls 3
+stop_supervisors
 while read -r line; do
   [ "$line" = "container-daemon --log-level warn" ] || {
     echo "FAIL: unexpected daemon invocation '$line'" >&2
@@ -84,7 +85,7 @@ done < "$DBR_CALLS"
 echo "PASS: crashed daemon is restarted until it succeeds"
 
 # A clean exit is a requested shutdown, so the daemon is not restarted.
-export DBR_SUCCEED_ON=1
+export DBR_EXIT_CODE=0
 start_case
 "$entrypoint" /bin/echo >/dev/null
 await_calls 1
@@ -96,7 +97,7 @@ await_calls 1
 echo "PASS: cleanly exited daemon is not restarted"
 
 # A daemon that is already supervised is not started a second time.
-export DBR_SUCCEED_ON=99
+export DBR_EXIT_CODE=1
 start_case
 "$entrypoint" /bin/echo >/dev/null
 await_calls 1
@@ -113,5 +114,22 @@ after=$(calls)
   exit 1
 }
 echo "PASS: a running supervisor is not duplicated"
+
+# Exit 2 means retrying cannot help (a rejected auth token). Restarting would
+# respawn forever and spam the host with rejected registrations.
+export DBR_EXIT_CODE=2
+start_case
+"$entrypoint" /bin/echo >/dev/null
+await_calls 1
+/bin/sleep 1
+[ "$(calls)" -eq 1 ] || {
+  echo "FAIL: permanent failure was retried ($(calls) invocations)" >&2
+  exit 1
+}
+[ "$(supervisor_count)" -eq 0 ] || {
+  echo "FAIL: supervisor still running after a permanent failure" >&2
+  exit 1
+}
+echo "PASS: permanent failure stops the supervisor"
 
 echo "entrypoint tests passed"

@@ -343,7 +343,12 @@ fn main() -> ExitCode {
 
             if let Err(e) = rt.block_on(dbr::container::run(config, resolved_token, shutdown_rx)) {
                 error!(error = %e, "container daemon failed");
-                return ExitCode::FAILURE;
+                return match e {
+                    dbr::container::ContainerError::AuthenticationFailed => {
+                        ExitCode::from(dbr::container::EXIT_PERMANENT_FAILURE)
+                    }
+                    _ => ExitCode::FAILURE,
+                };
             }
 
             ExitCode::SUCCESS

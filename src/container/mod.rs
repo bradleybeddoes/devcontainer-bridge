@@ -93,6 +93,13 @@ impl Backoff {
     }
 }
 
+/// Exit code for a failure that retrying cannot fix.
+///
+/// The devcontainer feature's entrypoint supervises the daemon and restarts it
+/// on any other non-zero exit, so a permanent failure needs a code of its own
+/// or a rejected token becomes an endless respawn loop.
+pub const EXIT_PERMANENT_FAILURE: u8 = 2;
+
 /// Errors that can occur in the container daemon.
 #[derive(Debug, Error)]
 pub enum ContainerError {
