@@ -131,14 +131,17 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
     writer: &mut W,
     msg: &Message,
 ) -> Result<(), ControlError> {
-    let json = serde_json::to_string(msg).map_err(ControlError::Serialization)?;
+    let mut json = serde_json::to_string(msg).map_err(ControlError::Serialization)?;
 
     if json.len() > MAX_MESSAGE_SIZE {
         return Err(ControlError::MessageTooLarge { size: json.len() });
     }
 
+    // One write, not two: a separate newline can be held back by Nagle until
+    // the first segment is acknowledged, and the peer cannot parse a message
+    // until the newline lands. The data path frames the same way.
+    json.push('\n');
     writer.write_all(json.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
     writer.flush().await?;
     Ok(())
 }
@@ -197,6 +200,8 @@ pub struct ControlConnection {
 impl ControlConnection {
     /// Wrap an existing [`TcpStream`] as a control connection.
     fn new(stream: TcpStream) -> Self {
+        // Control messages are small and latency-sensitive; Nagle only delays them.
+        let _ = stream.set_nodelay(true);
         let (read_half, write_half) = stream.into_split();
         Self {
             reader: BufReader::new(read_half),
