@@ -523,7 +523,10 @@ async fn run_session(
 ) -> (SessionOutcome, HashMap<u16, ListeningPort>) {
     // Track currently forwarded ports (initialized from previous session on reconnect)
     let mut forwarded = initial_forwarded;
+    // Tokio's default Burst behaviour fires catch-up ticks back to back after
+    // a slow cycle; spacing them keeps a slow scan from pinning a core.
     let mut scan_ticker = tokio::time::interval(params.scan_interval);
+    scan_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Channel for connect handlers and socket mirror accept loops to send
     // messages (ConnectFailed, SocketConnectRequest) back to the session

@@ -974,7 +974,10 @@ async fn handle_container_messages(
     mut connect_req_rx: mpsc::Receiver<OutboundConnectRequest>,
     mut outbound_msg_rx: mpsc::Receiver<Message>,
 ) -> Result<(), ControlError> {
+    // Tokio's default Burst behaviour fires catch-up ticks back to back after
+    // a slow cycle; spacing them keeps a slow scan from pinning a core.
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await; // consume the immediate first tick
     let mut missed_pongs: u32 = 0;
 
@@ -1569,14 +1572,33 @@ async fn run_socket_scanner(
 ) {
     let mut scanner =
         socket_scanner::SocketScanner::new(watch_paths, container_path_prefix, max_socket_forwards);
+    // Tokio's default Burst behaviour fires catch-up ticks back to back after
+    // a slow cycle; spacing them keeps a slow scan from pinning a core.
     let mut interval = tokio::time::interval(Duration::from_millis(scan_interval_ms));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     info!("socket scanner started");
 
     loop {
         interval.tick().await;
 
-        let (new_sockets, removed_sockets) = scanner.scan();
+        // scan() does blocking readdir and lstat over user-configured globs,
+        // which a `**` pattern can turn into a whole-subtree walk. Keep it off
+        // the runtime's worker threads.
+        let (returned, (new_sockets, removed_sockets)) =
+            match tokio::task::spawn_blocking(move || {
+                let result = scanner.scan();
+                (scanner, result)
+            })
+            .await
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    error!(error = %e, "socket scanner task failed, stopping scanner");
+                    return;
+                }
+            };
+        scanner = returned;
 
         if !new_sockets.is_empty() || !removed_sockets.is_empty() {
             let mut state = ctx.state.lock().await;
