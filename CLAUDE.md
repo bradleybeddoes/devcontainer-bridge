@@ -82,7 +82,7 @@ src/
   container/
     mod.rs              Container daemon main loop: host resolution, Register (with auth_token), scan/Forward/Unforward cycle, reconnection with exponential backoff, SIGTERM handling
     scanner.rs          /proc/net/tcp + /proc/net/tcp6 parser (hex port extraction, LISTEN state filtering, inode-to-process resolution)
-    filter.rs           Port filtering: --exclude-ports, --include-ports, --exclude-process regex, forwardPorts from devcontainer.json
+    filter.rs           Port filtering: --exclude-ports, --include-ports, process-name regex (implemented, no CLI flag wired), forwardPorts from devcontainer.json
     browser.rs          `dbr open` client: validates URL (http/https, 2048 char cap), connects to host, sends OpenUrl, waits for OpenUrlAck
     data.rs             Reverse data connection handler: on ConnectRequest, connects to local port + opens data connection to host + sends ConnectReady + bridges bidirectionally
     socket.rs           Mirror socket creation/cleanup, UnixListener accept loop, SocketConnectRequest dispatch + reverse data bridge for socket connections

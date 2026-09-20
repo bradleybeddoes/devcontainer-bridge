@@ -621,7 +621,7 @@ The container daemon applies filters to scanned ports before forwarding:
 
 1. **Exclude ports** (`--exclude-ports`): ports in this set are never forwarded. The control and data ports are always auto-excluded.
 2. **Include ports** (`--include-ports`): if non-empty, only ports in this set are forwarded (allowlist mode). Merged with `forwardPorts` from `devcontainer.json` if present.
-3. **Exclude process** (`--exclude-process`): a regex pattern matched against the process name. Matching ports are excluded.
+3. **Exclude process**: a regex pattern matched against the process name. Matching ports are excluded. Implemented in `filter.rs`, but no CLI flag is wired to it yet, so it is unreachable today.
 
 Filter evaluation order: exclude ports checked first (takes precedence), then include allowlist, then process regex. The default (no filters) forwards all detected listening ports, matching VS Code behavior.
 
