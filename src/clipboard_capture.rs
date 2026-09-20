@@ -379,33 +379,48 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    /// Seeds a named pasteboard with one file-URL item per source.
+    ///
+    /// `rendered_image` attaches a PNG to every item, as Finder does. Pass
+    /// `None` where the test only cares about the file URLs: a large
+    /// selection otherwise copies that image once per item, and the
+    /// pasteboard server has been seen to drop items it has not finished
+    /// ingesting by the time the writing process exits.
     async fn seed_file_pasteboard(
         name: &str,
         sources: &[&Path],
-        rendered_image: &Path,
+        rendered_image: Option<&Path>,
     ) -> Result<(), CaptureError> {
         let script = r#"ObjC.import('AppKit');
 function run(argv) {
     const board = $.NSPasteboard.pasteboardWithName(argv[0]);
-    const rendered = $.NSData.dataWithContentsOfFile(argv[argv.length - 1]);
-    if (rendered.isNil()) throw new Error('Missing rendered image fixture');
+    const renderedPath = argv[argv.length - 1];
+    let rendered = null;
+    if (renderedPath !== '-') {
+        rendered = $.NSData.dataWithContentsOfFile(renderedPath);
+        if (rendered.isNil()) throw new Error('Missing rendered image fixture');
+    }
     const items = $.NSMutableArray.array;
     for (let i = 1; i < argv.length - 1; i++) {
         const item = $.NSPasteboardItem.alloc.init;
         const fileUrl = $.NSURL.fileURLWithPath(argv[i]);
         item.setStringForType(fileUrl.absoluteString, 'public.file-url');
-        item.setDataForType(rendered, 'public.png');
+        if (rendered !== null) item.setDataForType(rendered, 'public.png');
         items.addObject(item);
     }
     board.clearContents;
     if (!board.writeObjects(items)) throw new Error('Unable to seed pasteboard');
+    const wanted = Number(items.count);
+    const written = Number(board.pasteboardItems.count);
+    if (written !== wanted)
+        throw new Error('Seeded ' + written + ' of ' + wanted + ' items');
 }"#;
         let mut command = Command::new("/usr/bin/osascript");
         command.args(["-l", "JavaScript", "-e", script, name]);
         for source in sources {
             command.arg(source);
         }
-        command.arg(rendered_image);
+        command.arg(rendered_image.unwrap_or_else(|| Path::new("-")));
         run_helper(&mut command, 0, CAPTURE_TIMEOUT)
             .await
             .map(|_| ())
@@ -445,7 +460,7 @@ function run(argv) {
             (&jpeg, ClipboardFormat::Jpeg, jpeg_bytes.as_slice()),
         ] {
             let name = pasteboard_name();
-            seed_file_pasteboard(&name, &[source.as_path()], &icon)
+            seed_file_pasteboard(&name, &[source.as_path()], Some(icon.as_path()))
                 .await
                 .unwrap();
             assert_eq!(
@@ -455,7 +470,7 @@ function run(argv) {
         }
 
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &[unsupported.as_path()], &icon)
+        seed_file_pasteboard(&name, &[unsupported.as_path()], Some(icon.as_path()))
             .await
             .unwrap();
         assert!(matches!(
@@ -464,7 +479,7 @@ function run(argv) {
         ));
 
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &[jpeg.as_path()], &icon)
+        seed_file_pasteboard(&name, &[jpeg.as_path()], Some(icon.as_path()))
             .await
             .unwrap();
         assert!(matches!(
@@ -476,7 +491,7 @@ function run(argv) {
         let file = std::fs::File::create(&oversized).unwrap();
         file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &[oversized.as_path()], &icon)
+        seed_file_pasteboard(&name, &[oversized.as_path()], Some(icon.as_path()))
             .await
             .unwrap();
         assert!(matches!(
@@ -504,7 +519,7 @@ function run(argv) {
         std::fs::write(&unsupported, b"not an image").unwrap();
 
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &[&first, &second, &third], &icon)
+        seed_file_pasteboard(&name, &[&first, &second, &third], Some(icon.as_path()))
             .await
             .unwrap();
         assert_eq!(
@@ -529,7 +544,7 @@ function run(argv) {
 
         // An explicit format applies to every file, not just the first.
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &[&first, &third], &icon)
+        seed_file_pasteboard(&name, &[&first, &third], Some(icon.as_path()))
             .await
             .unwrap();
         assert_eq!(
@@ -540,7 +555,7 @@ function run(argv) {
             2
         );
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &[&first, &second], &icon)
+        seed_file_pasteboard(&name, &[&first, &second], Some(icon.as_path()))
             .await
             .unwrap();
         assert!(matches!(
@@ -549,7 +564,7 @@ function run(argv) {
         ));
 
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &[&first, &unsupported], &icon)
+        seed_file_pasteboard(&name, &[&first, &unsupported], Some(icon.as_path()))
             .await
             .unwrap();
         assert!(matches!(
@@ -566,13 +581,13 @@ function run(argv) {
             .collect();
         let sources: Vec<&Path> = extras.iter().map(std::path::PathBuf::as_path).collect();
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &sources, &icon).await.unwrap();
+        seed_file_pasteboard(&name, &sources, None).await.unwrap();
         assert!(matches!(
             capture_from_pasteboard(ClipboardFormat::Auto, Some(&name)).await,
             Err(CaptureError::Unavailable)
         ));
         let name = pasteboard_name();
-        seed_file_pasteboard(&name, &sources[1..], &icon)
+        seed_file_pasteboard(&name, &sources[1..], None)
             .await
             .unwrap();
         assert_eq!(
