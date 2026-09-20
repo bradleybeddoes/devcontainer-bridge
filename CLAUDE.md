@@ -69,16 +69,18 @@ Control and data ports use auto-detected bind addresses: `0.0.0.0` if Docker is 
 ```
 src/
   main.rs               CLI entrypoint, clap dispatch, tracing init, dbr-open hardlink detection
-  dbr/entrypoint.sh     Devcontainer feature entrypoint — starts container daemon on container boot
-  cli.rs                Clap subcommand definitions (HostDaemon with --bind-addr/--no-docker-detect/--no-auth, ContainerDaemon, Status, Forward, Unforward, Open, Ensure)
-  protocol.rs           All JSON-line message types (Register, Forward, ConnectRequest, SocketForward, SocketUnforward, SocketConnectRequest, OpenUrl, Ping/Pong, etc.)
+  (features/dbr/)       Devcontainer feature: install.sh downloads a released binary, entrypoint.sh supervises the container daemon, devcontainer-feature.json is versioned separately from the binary
+  cli.rs                Clap subcommand definitions (HostDaemon with --bind-addr/--no-docker-detect/--no-auth, ContainerDaemon, Status, Forward, Unforward, Open, Ensure, Paste)
+  protocol.rs           All JSON-line message types (Register, Forward, ConnectRequest, SocketForward, SocketUnforward, SocketConnectRequest, OpenUrl, ClipboardRead/ClipboardBatchReady/ClipboardReady, Ping/Pong, etc.)
   control.rs            TCP JSON-line framing (read_message/write_message), ControlListener, ControlConnection, connect()
   config.rs             Config struct, TOML file loading (~/.config/dbr/config.toml), env var layering (DCBRIDGE_HOST, DCBRIDGE_HOST_PORT), [socket_forwarding] section
   auth.rs               Token generation (64-char hex), persistence (~/.config/dbr/auth-token, 0600 perms), resolution (CLI flag > env var > file)
-  lib.rs                Crate root — re-exports auth, config, container, control, host, protocol modules
+  clipboard_capture.rs  Host-side PNG/JPEG capture: macOS JXA pasteboard helper (multi-file Finder selections, TIFF->PNG), Linux wl-paste/xclip, bounded subprocess output
+  clipboard_client.rs   `dbr paste` client: receives one or many images, saves them 0600 into one 0700 transfer directory, optional tmux path insertion
+  lib.rs                Crate root — re-exports auth, clipboard_capture, clipboard_client, config, container, control, host, protocol modules
 
   container/
-    mod.rs              Container daemon main loop: host resolution, Register (with auth_token), scan/Forward/Unforward cycle, reconnection with exponential backoff, signal handling, parent PID monitoring
+    mod.rs              Container daemon main loop: host resolution, Register (with auth_token), scan/Forward/Unforward cycle, reconnection with exponential backoff, SIGTERM handling
     scanner.rs          /proc/net/tcp + /proc/net/tcp6 parser (hex port extraction, LISTEN state filtering, inode-to-process resolution)
     filter.rs           Port filtering: --exclude-ports, --include-ports, --exclude-process regex, forwardPorts from devcontainer.json
     browser.rs          `dbr open` client: validates URL (http/https, 2048 char cap), connects to host, sends OpenUrl, waits for OpenUrlAck
@@ -90,6 +92,7 @@ src/
     listener.rs         Per-port TCP listener: binds [::1] with 127.0.0.1 fallback, accepts client connections, shutdown via watch channel
     proxy.rs            PendingConnections map (conn_id -> oneshot<TcpStream>), register/resolve/cancel pending, bridge_connection with 10s timeout, bidirectional copy
     browser.rs          BrowserOpener: URL validation, localhost port rewriting (container port -> host port), rate limiting (5/sec), open via `open` (macOS) / `xdg-open` (Linux)
+    clipboard.rs        ClipboardService: opt-in + token check before capture, one transfer at a time, batch header only for multi-image responses
     ensure.rs           `dbr ensure` logic: Ping/Pong health check, spawn background daemon if not running, PID file management, port conflict detection with actionable error
     socket_scanner.rs   Glob-based Unix socket discovery (watch_paths patterns), lifecycle tracking (appear/disappear), container path rewriting, symlink_metadata (no symlink following)
 
@@ -97,6 +100,9 @@ tests/
   integration/
     main.rs             Test harness entry
     forwarding.rs       13 integration tests: register/forward/unforward lifecycle, cleanup on disconnect, Ping/Pong, ListRequest/ListResponse, multi-container port conflict, full reverse proxy pipeline, data handshake, reconnection, ConnectFailed handling, bridge timeout
+  clipboard.rs        Linux-only: real `dbr paste` CLI against a real host daemon with mocked wl-paste/xclip, opt-in/auth gating, tmux insertion
+  install.sh          Host installer: atomic replacement, checksum verification, dbr-open hardlink
+  entrypoint.sh       Devcontainer feature entrypoint: daemon restarted on crash, not after a clean exit, never duplicated
   e2e/
     Dockerfile          Minimal Alpine 3.21 image (python3, bash) for self-contained e2e tests
     docker-compose.yml  Compose definition (project: dbr-e2e, service: dbr-test-app) with host.docker.internal mapping

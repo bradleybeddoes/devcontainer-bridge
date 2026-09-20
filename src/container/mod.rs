@@ -265,7 +265,7 @@ pub async fn run(
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), ContainerError> {
     // Set up an internal shutdown channel that merges external shutdown
-    // with Unix signals (SIGTERM, SIGHUP) and parent PID reparenting.
+    // with SIGTERM.
     let (internal_tx, internal_rx) = tokio::sync::watch::channel(false);
 
     // Forward the external shutdown signal
